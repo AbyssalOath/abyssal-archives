@@ -1,0 +1,13 @@
+# Optional (DB_PUBLISH=true in .env; install.sh then sets COMPOSE_FILE to
+# include this file): publish MariaDB on the host's 127.0.0.1 only, for host
+# tools (cargo run, a SQL client). The default is no host port at all.
+# The backend network is internal, which cannot publish ports, so MariaDB
+# also joins a small non-internal network here.
+services:
+  mariadb:
+    networks: [backend, dbhost]
+    ports:
+      - "127.0.0.1:${DB_PORT:-3306}:3306"
+
+networks:
+  dbhost: {}

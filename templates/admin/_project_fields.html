@@ -1,0 +1,9 @@
+<input type="hidden" name="csrf" value="{{ l.csrf() }}">
+<label for="name">Name</label>
+<input id="name" name="name" value="{{ form.name }}" required maxlength="200">
+<label for="slug">Slug <span class="muted">(URL: /p/&lt;slug&gt;; blank = from name)</span></label>
+<input id="slug" name="slug" value="{{ form.slug }}" maxlength="64" pattern="[a-z0-9]+(-[a-z0-9]+)*">
+<label for="summary">Summary <span class="muted">(one line, shown on the home page)</span></label>
+<input id="summary" name="summary" value="{{ form.summary }}" maxlength="500">
+<label for="description_md">Description <span class="muted">(Markdown)</span></label>
+<textarea id="description_md" name="description_md" rows="10">{{ form.description_md }}</textarea>

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Site settings</h1>
+{% if saved %}<p class="alert alert-ok" role="status">Settings saved.</p>{% endif %}
+{% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+<section class="card">
+  <form method="post" action="/admin/settings" class="form">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <label for="site_name">Site name</label>
+    <input id="site_name" name="site_name" value="{{ form.name }}" required maxlength="100">
+    <label for="site_tagline">Tagline</label>
+    <input id="site_tagline" name="site_tagline" value="{{ form.tagline }}" maxlength="200">
+    <label for="footer_text">Footer text <span class="muted">(blank = "&copy; year site name")</span></label>
+    <input id="footer_text" name="footer_text" value="{{ form.footer }}" maxlength="500">
+    <label for="download_base_url">Download base URL <span class="muted">(e.g. https://dl.example.com; blank = same host as this site)</span></label>
+    <input id="download_base_url" name="download_base_url" value="{{ form.download_base_url }}" maxlength="255" placeholder="https://dl.example.com">
+    <label for="gpg_public_key">OpenPGP public key for <code>/gpg.pub</code> <span class="muted">(ASCII-armored; blank = not published)</span></label>
+    <textarea id="gpg_public_key" name="gpg_public_key" rows="6" maxlength="32768" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----">{{ form.gpg_public_key }}</textarea>
+    <p class="muted">Only the public key. Signing happens on your own machine; see docs/VERIFYING.md.</p>
+    <fieldset class="sharing">
+      <legend>External sharing <span class="muted">(all off by default)</span></legend>
+      <label class="checkbox"><input type="checkbox" name="external_mirrors_enabled" value="1"{% if form.external_mirrors_enabled %} checked{% endif %}> Show approved mirrors and torrent links</label>
+      <p class="muted">Public file lists get "Mirror (…)" and "Torrent (…)" links to copies hosted elsewhere
+        (Archive.org, GitHub, other servers) that you approved. Visitors' browsers go to those sites directly; this
+        server never proxies them. Off: mirrors stay stored but are not shown.</p>
+      <label class="checkbox"><input type="checkbox" name="torrent_dht_enabled" value="1"{% if form.torrent_dht_enabled %} checked{% endif %}> Public torrents (DHT/PEX)</label>
+      <p class="muted">For torrents this site generates in the future: public (found via DHT and peer exchange)
+        instead of private-flagged. <strong>Public mode exposes the seeder's IP (the VPN IP if the seeder profile is
+        used). Never run a seeder outside the VPN container.</strong></p>
+      <label class="checkbox"><input type="checkbox" name="mirror_discovery_enabled" value="1"{% if form.mirror_discovery_enabled %} checked{% endif %}> Mirror discovery <span class="muted">(not implemented, no effect)</span></label>
+      <p class="muted">Planned: look files up by hash on known public hosts and suggest mirrors as "pending".
+        Makes no network requests today.</p>
+      <label class="checkbox"><input type="checkbox" name="federation_enabled" value="1"{% if form.federation_enabled %} checked{% endif %}> Federation <span class="muted">(not implemented, no effect)</span></label>
+      <p class="muted">Planned: exchange signed (hash, mirror URL) lists with other opted-in instances; everything
+        received would start "pending". Makes no network requests today.</p>
+    </fieldset>
+    <fieldset class="sharing">
+      <legend>Member accounts</legend>
+      <label class="checkbox"><input type="checkbox" name="registration_open" value="1"{% if form.registration_open %} checked{% endif %}> Allow account requests at <code>/register</code></label>
+      <p class="muted">Anyone can ask for an account; every request waits for your approval under Users (there is no
+        e-mail: applicants find out by signing in). Off: <code>/register</code> says requests are suspended and shows the
+        contact address below. You can always create member accounts yourself.</p>
+      <label for="contact_email">Contact e-mail for access requests <span class="muted">(shown while requests are off; blank = "contact the site administrator")</span></label>
+      <input id="contact_email" name="contact_email" type="email" value="{{ form.contact_email }}" maxlength="254" placeholder="admin@example.com">
+      <label class="checkbox"><input type="checkbox" name="review_member_uploads" value="1"{% if form.review_member_uploads %} checked{% endif %}> Review member uploads before they are published <span class="muted">(recommended)</span></label>
+      <p class="muted">New and changed member projects and releases, and releases they upload to, stay hidden until you
+        publish them under Review. Off: members publish directly (you can still unpublish anything).</p>
+      <label for="member_upload_limit">Member upload limit per file <span class="muted">(e.g. 100M; never more than MAX_UPLOAD_BYTES = {{ max_upload }})</span></label>
+      <input id="member_upload_limit" name="member_upload_limit" value="{{ member_upload_limit }}" required maxlength="20">
+      <label for="member_storage_quota">Member storage quota <span class="muted">(e.g. 1G; per member, all their files)</span></label>
+      <input id="member_storage_quota" name="member_storage_quota" value="{{ member_storage_quota }}" required maxlength="20">
+      <p class="muted">Defaults for every member; set higher limits for one member under Users (members can ask on their Limits page).</p>
+    </fieldset>
+    <button type="submit" class="btn btn-primary glow">Save settings</button>
+  </form>
+</section>
+<p class="muted">Site name, tagline, download base URL and the sharing toggles start out from <code>.env</code>
+  (SITE_NAME, SITE_TAGLINE, DOWNLOAD_BASE_URL, EXTERNAL_MIRRORS_ENABLED, ...). Once you save a different value here, this page wins;
+  saving the same value as <code>.env</code> hands control back to <code>.env</code>.</p>
+{% endblock %}

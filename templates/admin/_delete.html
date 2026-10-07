@@ -1,0 +1,5 @@
+<form method="post" action="{{ delete_action }}" class="form danger-zone">
+  <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+  <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> {{ delete_label }}</label>
+  <button type="submit" class="btn btn-danger">Delete</button>
+</form>

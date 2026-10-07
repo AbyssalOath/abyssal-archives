@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+{% let base = l.base() %}
+<p class="crumbs"><a href="{{ base }}/projects">Projects</a> / <a href="{{ base }}/projects/{{ project.id }}/releases">{{ project.name }}</a> /</p>
+<h1>Edit release</h1>
+<p class="actions"><a class="btn" href="{{ base }}/releases/{{ id }}/files">Manage files</a></p>
+<section class="card">
+  {% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+  {% if resubmits %}<p class="muted">Saving sends the release to an administrator for review; it is hidden until approved.</p>{% endif %}
+  <form method="post" action="{{ base }}/releases/{{ id }}/edit" class="form">
+    {% include "admin/_release_fields.html" %}
+    <button type="submit" class="btn btn-primary glow">Save</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Delete release</h2>
+  {% let delete_action = format!("{}/releases/{}/delete", base, self.id) %}
+  {% let delete_label = "Yes, delete this release and all its files" %}
+  {% include "admin/_delete.html" %}
+</section>
+{% endblock %}

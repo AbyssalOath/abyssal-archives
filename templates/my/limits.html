@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Limits</h1>
+{% if flash %}<p class="alert alert-ok" role="status">Request sent. An administrator will decide; check back here.</p>{% endif %}
+<section class="card">
+  <ul class="stats">
+    <li class="card stat"><span class="stat-value">{{ upload_limit }}</span> largest upload</li>
+    <li class="card stat"><span class="stat-value">{{ storage_quota }}</span> storage quota</li>
+    <li class="card stat"><span class="stat-value">{{ used }}</span> used</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Ask for more</h2>
+  {% if has_pending %}
+  <p class="muted">Your request is waiting for an administrator. You can send another once it is decided.</p>
+  {% else %}
+  {% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+  <form method="post" action="/my/limits" class="form">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <label for="upload_limit">Upload limit per file you need <span class="muted">(e.g. 500M; the site maximum is {{ max_upload }}; blank = no change)</span></label>
+    <input id="upload_limit" name="upload_limit" value="{{ form_upload }}" maxlength="20">
+    <label for="storage_quota">Storage quota you need <span class="muted">(e.g. 10G; blank = no change)</span></label>
+    <input id="storage_quota" name="storage_quota" value="{{ form_quota }}" maxlength="20">
+    <label for="reason">Why do you need it?</label>
+    <textarea id="reason" name="reason" rows="4" required minlength="10" maxlength="1000">{{ form_reason }}</textarea>
+    <button type="submit" class="btn btn-primary glow">Send request</button>
+  </form>
+  {% endif %}
+</section>
+
+{% if !requests.is_empty() %}
+<section class="card">
+  <h2>Your requests</h2>
+  <ul class="file-list">
+    {% for r in requests %}
+    <li class="file"><div class="file-info">
+      <span class="file-name">{{ r.created }} <span class="status status-{{ r.status }}">{{ r.status }}</span></span>
+      <span class="file-meta">{% if !r.upload_limit.is_empty() %}upload limit {{ r.upload_limit }} {% endif %}{% if !r.storage_quota.is_empty() %}quota {{ r.storage_quota }}{% endif %}</span>
+      <span class="review-note">“{{ r.reason }}”</span>
+      {% if !r.admin_note.is_empty() %}<span class="file-meta">Administrator: {{ r.admin_note }}</span>{% endif %}
+    </div></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

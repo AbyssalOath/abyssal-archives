@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<ul class="stats">
+  <li class="card stat"><span class="stat-value">{{ stats.projects }}</span> projects</li>
+  <li class="card stat"><span class="stat-value">{{ stats.releases }}</span> releases</li>
+  <li class="card stat"><span class="stat-value">{{ stats.files }}</span> files ({{ total_size }})</li>
+  <li class="card stat"><span class="stat-value">{{ stats.downloads }}</span> downloads</li>
+</ul>
+{% if pending.0 + pending.1 + pending.2 > 0 %}
+<p class="alert alert-ok" role="status">Waiting for you:
+  {% if pending.0 > 0 %}<a href="/admin/users">{{ pending.0 }} account request(s)</a>{% endif %}
+  {% if pending.1 > 0 %}<a href="/admin/review">{{ pending.1 }} item(s) to review</a>{% endif %}
+  {% if pending.2 > 0 %}<a href="/admin/users">{{ pending.2 }} limit request(s)</a>{% endif %}</p>
+{% endif %}
+<p class="actions">
+  <a class="btn btn-primary glow" href="/admin/projects">Manage projects</a>
+  <a class="btn" href="/admin/settings">Site settings</a>
+</p>
+
+<section class="card">
+  <h2>Storage integrity</h2>
+  <p class="muted">Re-reads every ready file from storage and compares its size, SHA-256 and SHA-512 with the
+    recorded values (bit rot, tampering). Runs in the background; nothing is changed automatically.</p>
+  {% if integrity.running %}
+  <p role="status">Checking… {{ integrity.checked }} of {{ integrity.total }} files. This page refreshes every 5 seconds.</p>
+  {% else %}
+    {% if let Some(t) = integrity.finished %}
+      {% if integrity.problems.is_empty() %}
+      <p class="alert alert-ok">Last check {{ t.format("%Y-%m-%d %H:%M UTC") }}: all {{ integrity.checked }} files match.</p>
+      {% else %}
+      <p class="alert alert-error">Last check {{ t.format("%Y-%m-%d %H:%M UTC") }}: {{ integrity.problems.len() }} problem(s) in {{ integrity.checked }} files.
+        Use "Recompute hashes" on a file to mark it failed, then re-import it.</p>
+      <ul>{% for p in integrity.problems %}<li>#{{ p.0 }} <code>{{ p.1 }}</code>: {{ p.2 }}</li>{% endfor %}</ul>
+      {% endif %}
+    {% endif %}
+  <form method="post" action="/admin/integrity" class="inline">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <button type="submit" class="btn">Verify storage integrity</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="visually-hidden">{{ l.site.name }}</h1>
+{% if projects.is_empty() %}
+<section class="card empty">
+  <h2>No projects yet</h2>
+  <p>Nothing has been published here so far. Check back soon.</p>
+</section>
+{% else %}
+<ul class="project-grid">
+  {% for p in projects %}
+  <li class="card project-card">
+    <h2><a href="/p/{{ p.slug }}">{{ p.name }}</a></h2>
+    {% if !p.summary.is_empty() %}<p>{{ p.summary }}</p>{% endif %}
+    <p class="meta">
+      {% if let Some(v) = p.latest_version %}Latest: <span class="badge">{{ v }}</span>{% else %}No releases yet{% endif %}
+    </p>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

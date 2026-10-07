@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card error-page">
+  <p class="error-code glow-text">{{ status }}</p>
+  <h1>{{ reason }}</h1>
+  <p>{{ message }}</p>
+  <p><a class="btn btn-primary glow" href="/">Back to the home page</a></p>
+</section>
+{% endblock %}

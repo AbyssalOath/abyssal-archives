@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+{% let base = l.base() %}
+<p class="crumbs"><a href="{{ base }}/projects">Projects</a> /</p>
+<h1>Edit project {% let rs = review_status.as_str() %}{% include "admin/_review_badge.html" %}</h1>
+{% if !review_note.is_empty() %}<p class="alert alert-error">Administrator's note: {{ review_note }}</p>{% endif %}
+<section class="card">
+  {% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+  {% if resubmits %}<p class="muted">Saving sends the project to an administrator for review; it is hidden until approved.</p>{% endif %}
+  <form method="post" action="{{ base }}/projects/{{ id }}/edit" class="form">
+    {% include "admin/_project_fields.html" %}
+    <button type="submit" class="btn btn-primary glow">Save</button>
+  </form>
+</section>
+{% if l.is_admin() %}
+<section class="card">
+  <h2>Review</h2>
+  <p class="muted">Only published projects (and their published releases) are public.</p>
+  {% let review_action = format!("/admin/projects/{}/review", self.id) %}
+  {% let review_back = "edit" %}
+  {% include "admin/_review_form.html" %}
+</section>
+{% endif %}
+<section class="card">
+  <h2>Delete project</h2>
+  {% let delete_action = format!("{}/projects/{}/delete", base, self.id) %}
+  {% let delete_label = "Yes, delete this project with all its releases and files" %}
+  {% include "admin/_delete.html" %}
+</section>
+{% endblock %}

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% if let Some(secs) = l.refresh %}<meta http-equiv="refresh" content="{{ secs }}">
+{% endif %}<title>{% if !l.title.is_empty() %}{{ l.title }} · {% endif %}{{ l.site.name }}</title>
+<link rel="stylesheet" href="/static/style.css?v={{ l.css_version }}">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <div class="brand">
+      <a class="site-title glow-text" href="/">{{ l.site.name }}</a>
+      {% if !l.site.tagline.is_empty() %}<p class="tagline">{{ l.site.tagline }}</p>{% endif %}
+    </div>
+    {% if let Some(nav) = l.nav %}
+    <nav class="admin-nav" aria-label="{% if nav.is_admin %}Admin{% else %}Account{% endif %}">
+      {% if nav.is_admin %}
+      <a href="/admin">Dashboard</a>
+      <a href="/admin/projects">Projects</a>
+      <a href="/admin/review">Review</a>
+      <a href="/admin/users">Users</a>
+      <a href="/admin/settings">Settings</a>
+      {% else %}
+      <a href="/my/projects">My projects</a>
+      <a href="/my/limits">Limits</a>
+      {% endif %}
+      <a href="{{ nav.base }}/password">Account</a>
+      {% if l.totp_enabled %}<a href="{{ nav.base }}/2fa">2FA</a>{% endif %}
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf" value="{{ nav.csrf }}">
+        <button type="submit" class="btn btn-link">Sign out {{ nav.username }}</button>
+      </form>
+    </nav>
+    {% endif %}
+  </div>
+</header>
+<main id="main" class="wrap">
+{% block content %}{% endblock %}
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <p>{% if l.site.footer.is_empty() %}&copy; {{ l.year }} {{ l.site.name }}{% else %}{{ l.site.footer }}{% endif %}
+    {% if l.nav.is_none() %}· <a href="/login">Login</a>{% endif %}</p>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<input type="hidden" name="csrf" value="{{ l.csrf() }}">
+<label for="version">Version</label>
+<input id="version" name="version" value="{{ form.version }}" required maxlength="64">
+<label for="released_at">Release date</label>
+<input id="released_at" name="released_at" type="date" value="{{ form.released_at }}">
+<label for="notes_md">Release notes <span class="muted">(Markdown)</span></label>
+<textarea id="notes_md" name="notes_md" rows="8">{{ form.notes_md }}</textarea>

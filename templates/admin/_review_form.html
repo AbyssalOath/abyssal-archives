@@ -1,0 +1,10 @@
+<form method="post" action="{{ review_action }}" class="form">
+  <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+  <input type="hidden" name="back" value="{{ review_back }}">
+  <label for="review-note">Note for the owner <span class="muted">(shown when not published; optional)</span></label>
+  <input id="review-note" name="note" maxlength="500">
+  <p class="actions">
+    <button type="submit" name="decision" value="approve" class="btn btn-primary">Publish</button>
+    <button type="submit" name="decision" value="reject" class="btn btn-danger">Do not publish</button>
+  </p>
+</form>

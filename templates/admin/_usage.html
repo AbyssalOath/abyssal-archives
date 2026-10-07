@@ -1,0 +1,4 @@
+{% if let Some(u) = usage %}
+<p class="muted">Storage: {{ u.used }} of {{ u.quota }} used · largest upload {{ u.upload_limit }} · <a href="/my/limits">need more?</a>
+{% if u.review %}<br>New projects, releases and uploads are published after an administrator reviews them.{% endif %}</p>
+{% endif %}

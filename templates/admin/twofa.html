@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Two-factor authentication</h1>
+{% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+
+{% if !new_codes.is_empty() %}
+<section class="card">
+  <h2>Your recovery codes</h2>
+  <p><strong>Save these now; they are shown only once.</strong> Each works one time instead of an
+    authenticator code. Store them offline (password manager, printed copy).</p>
+  <ul class="recovery-codes">{% for c in new_codes %}<li><code class="hash">{{ c }}</code></li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+{% if let Some(secret) = setup_secret %}
+<section class="card">
+  <h2>Scan with your authenticator app</h2>
+  <div class="qr">{{ setup_qr|safe }}</div>
+  <p>Or enter this key by hand (time-based, SHA-1, 6 digits, 30 s):</p>
+  <p><code class="hash">{{ secret }}</code></p>
+  <form method="post" action="{{ l.base() }}/2fa/confirm" class="form">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <label for="code">Code from the app</label>
+    <input id="code" name="code" required maxlength="8" inputmode="numeric" autocomplete="one-time-code">
+    <button type="submit" class="btn btn-primary glow">Turn on two-factor authentication</button>
+  </form>
+</section>
+{% else if enabled %}
+<section class="card">
+  <p class="alert alert-ok">Two-factor authentication is <strong>on</strong>. {{ remaining_codes }} unused recovery code(s) left.</p>
+  <form method="post" action="{{ l.base() }}/2fa/recovery-codes" class="form">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <label for="rc-password">Current password</label>
+    <input id="rc-password" name="password" type="password" required autocomplete="current-password">
+    <button type="submit" class="btn">Generate new recovery codes</button>
+  </form>
+  <form method="post" action="{{ l.base() }}/2fa/disable" class="form danger-zone">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <label for="d-password">Current password</label>
+    <input id="d-password" name="password" type="password" required autocomplete="current-password">
+    <label for="d-code">Authenticator or recovery code</label>
+    <input id="d-code" name="code" required maxlength="32" autocomplete="one-time-code">
+    <button type="submit" class="btn btn-danger">Turn off two-factor authentication</button>
+  </form>
+</section>
+{% else %}
+<section class="card">
+  <p>Two-factor authentication is <strong>off</strong>. With it on, signing in also needs a code from an
+    authenticator app (or a one-time recovery code).</p>
+  {% if l.is_admin() %}<p class="muted">Locked out? On the server: <code>docker compose exec app /app/filehost admin reset-2fa</code></p>
+  {% else %}<p class="muted">Locked out? Ask the site administrator to turn two-factor authentication off for your account.</p>{% endif %}
+  <form method="post" action="{{ l.base() }}/2fa/setup" class="form">
+    <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+    <label for="s-password">Current password</label>
+    <input id="s-password" name="password" type="password" required autocomplete="current-password">
+    <button type="submit" class="btn btn-primary glow">Set up two-factor authentication</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

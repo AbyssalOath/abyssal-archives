@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block content %}
+{% let csrf = l.csrf() %}
+{% let base = l.base() %}
+<p class="crumbs"><a href="{{ base }}/projects">Projects</a> / <a href="{{ base }}/projects/{{ project.id }}/releases">{{ project.name }}</a> /</p>
+<h1>{{ project.name }} {{ release.version }}: files {% let rs = release.review_status.as_str() %}{% include "admin/_review_badge.html" %}</h1>
+<p class="actions">
+  {% if published %}<a class="btn" href="/p/{{ project.slug }}">View public page</a>{% endif %}
+  <a class="btn" href="{{ base }}/releases/{{ release.id }}/edit">Edit release</a>
+  <a class="btn" href="{{ base }}/releases/{{ release.id }}/files">Refresh</a>
+</p>
+{% if let Some(m) = flash %}<p class="alert alert-ok" role="status">{{ m }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+{% if let Some(n) = release.review_note %}<p class="alert alert-error">Administrator's note: {{ n }}</p>{% endif %}
+{% if !published %}<p class="muted">Not public yet{% if project.review_status != "approved" %} (the project is not published){% endif %}:
+  download links below work only for {% if l.is_admin() %}administrators and the owner{% else %}you and the administrators{% endif %}.</p>{% endif %}
+{% include "admin/_usage.html" %}
+{% if l.is_admin() %}
+<section class="card">
+  <h2>Review</h2>
+  <p class="muted">Download and check the files, then publish this release (or don't).</p>
+  {% let review_action = format!("/admin/releases/{}/review", self.release.id) %}
+  {% let review_back = "files" %}
+  {% include "admin/_review_form.html" %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Files in this release</h2>
+  <p class="muted">{{ storage_note }}</p>
+  {% if files.is_empty() %}
+  <p class="muted">No files yet.{% if l.is_admin() %} Import one from the incoming folder below.{% endif %}</p>
+  {% else %}
+  <ul class="file-list admin-files">
+    {% for f in files %}
+    <li class="file">
+      <div class="file-info">
+        <span class="file-name">{{ f.filename }} <span class="status status-{{ f.status }}">{{ f.status }}</span></span>
+        {% if f.status == "ready" %}
+        <span class="file-meta">{{ f.size }} · {{ f.downloads }} downloads · <a href="{{ f.download_url }}">{% if published %}download link{% else %}download (private){% endif %}</a></span>
+        <span class="file-hash">SHA-256 <code class="hash">{{ f.sha256 }}</code></span>
+        <span class="file-hash">SHA-512 <code class="hash">{% if f.sha512.is_empty() %}n/a{% else %}{{ f.sha512 }}{% endif %}</code></span>
+        {% if l.is_admin() %}
+        {% if !f.mirrors.is_empty() %}<span class="file-meta">Mirrors: {% for m in f.mirrors %}{{ m }}{% if !loop.last %} · {% endif %}{% endfor %}</span>{% endif %}
+        <span class="file-hash">Storage key <code>{{ f.storage_key }}</code></span>
+        {% endif %}
+        {% else if f.status == "importing" %}
+        <span class="file-meta">Hashing and moving into storage… this page refreshes every 5 seconds.</span>
+        {% else if f.status == "hashing" %}
+        <span class="file-meta">Recomputing hashes… this page refreshes every 5 seconds.</span>
+        {% else %}
+        <span class="file-meta error-text">{{ f.error_message }}</span>
+        {% endif %}
+      </div>
+      {% if f.status != "importing" && f.status != "hashing" %}
+      <div class="file-admin-actions">
+        {% if l.is_admin() %}
+        {% if f.status == "ready" %}
+        <a class="btn btn-small" href="/admin/files/{{ f.id }}/mirrors">Mirrors ({{ f.mirrors.len() }})</a>
+        {% endif %}
+        {% if f.can_rehash %}
+        <form method="post" action="/admin/files/{{ f.id }}/rehash" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-small">Recompute hashes</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        <form method="post" action="{{ base }}/files/{{ f.id }}/delete" class="form form-inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> confirm</label>
+          <button type="submit" class="btn btn-small btn-danger">Delete</button>
+        </form>
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+{% if l.is_admin() %}
+<section class="card">
+  <h2>Import from the incoming folder</h2>
+  <p>Copy large files into <code>{{ incoming_path }}</code> (rsync, scp or SMB; see docs/IMPORT.md), then import them here.
+     Hidden files, partial transfers and files changed in the last {{ min_age_secs }} seconds are not offered.</p>
+  {% if let Some(e) = incoming_error %}
+  <p class="alert alert-error" role="alert">{{ e }}</p>
+  {% else if candidates.is_empty() %}
+  <p class="muted">The incoming folder is empty.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th scope="col">File</th><th scope="col">Size</th><th scope="col">Modified</th><th scope="col">Action</th></tr></thead>
+    <tbody>
+    {% for c in candidates %}
+    <tr>
+      <td><code>{{ c.rel_path }}</code></td>
+      <td>{{ c.size }}</td>
+      <td>{{ c.modified }}</td>
+      <td>
+        {% if c.in_flight %}<span class="muted">importing…</span>
+        {% else if !c.settled %}<span class="muted">still being copied</span>
+        {% else %}
+        <form method="post" action="/admin/releases/{{ release.id }}/import" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="path" value="{{ c.rel_path }}">
+          <button type="submit" class="btn btn-small btn-primary">Import</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Signed checksums (SHA256SUMS.asc)</h2>
+  {% if !sign_checksums %}
+  <p class="muted">Off (<code>SIGN_CHECKSUMS=false</code>): no signature is served. See docs/VERIFYING.md.</p>
+  {% else %}
+  <p>Sign this release's checksum file on <strong>your own machine</strong> (the server never holds a private key),
+    then paste the signature here:</p>
+  <pre><code>curl -fsSO {{ sums_url }}
+gpg --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+cat SHA256SUMS.asc</code></pre>
+  {% if signature_status == "current" %}<p class="alert alert-ok">A signature for the current SHA256SUMS is published.</p>
+  {% else if signature_status == "outdated" %}<p class="alert alert-error">The stored signature is for an older file set and is not
+    served. Download SHA256SUMS again, re-sign it and paste the new signature.</p>
+  {% else %}<p class="muted">No signature yet.</p>{% endif %}
+  <form method="post" action="/admin/releases/{{ release.id }}/signature" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="signature">Detached ASCII-armored signature <span class="muted">(blank = remove)</span></label>
+    <textarea id="signature" name="signature" rows="8" maxlength="16384" placeholder="-----BEGIN PGP SIGNATURE-----"></textarea>
+    <button type="submit" class="btn btn-primary">Save signature</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if allow_web_upload %}
+<section class="card">
+  {% if l.is_admin() %}
+  <h2>Upload a small file</h2>
+  <p>Browser uploads are limited to <strong>{{ max_upload }}</strong> per request (reverse proxies and tunnels
+     such as Cloudflare cap request size and time). For anything larger, use the incoming folder above.</p>
+  {% else %}
+  <h2>Upload files</h2>
+  <p>Each file can be up to <strong>{{ max_upload }}</strong>, within your storage quota.</p>
+  {% endif %}
+  <form method="post" action="{{ base }}/releases/{{ release.id }}/upload" enctype="multipart/form-data" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="file">File(s)</label>
+    <input id="file" name="file" type="file" multiple required>
+    <button type="submit" class="btn btn-primary glow">Upload</button>
+  </form>
+</section>
+{% else if !l.is_admin() %}
+<p class="muted">Uploading is turned off on this site.</p>
+{% endif %}
+{% endblock %}

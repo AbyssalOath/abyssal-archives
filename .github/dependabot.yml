@@ -1,0 +1,37 @@
+# Weekly dependency updates. Docker digests (Dockerfile, docker-compose.yml)
+# and the SHA-pinned GitHub Actions are updated as pull requests too.
+# Review database PRs carefully: CI tests against the MariaDB version pinned
+# in .github/workflows/ci.yml, so keep that in step with docker-compose.yml.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    # Major versions of the service images (MariaDB, Caddy, gluetun,
+    # qBittorrent) are upgraded deliberately, not by bot: e.g. MariaDB stays
+    # on its LTS line (11.8) instead of following short-lived rolling
+    # releases, and a database major upgrade cannot be rolled back.
+    # Patch releases and digest updates still come through.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

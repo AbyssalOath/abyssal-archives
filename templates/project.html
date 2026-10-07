@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="project">
+  <h1>{{ name }}</h1>
+  {% if !summary.is_empty() %}<p class="lead">{{ summary }}</p>{% endif %}
+  {% if !description_html.is_empty() %}<div class="prose">{{ description_html|safe }}</div>{% endif %}
+
+  <h2 id="releases">Releases</h2>
+  {% if releases.is_empty() %}
+  <p class="muted">No releases yet.</p>
+  {% endif %}
+  {% for r in releases %}
+  <section class="card release{% if loop.first %} release-latest glow{% endif %}" aria-labelledby="rel-{{ loop.index }}">
+    <header class="release-head">
+      <h3 id="rel-{{ loop.index }}">{{ r.version }}{% if loop.first %} <span class="badge">Latest</span>{% endif %}</h3>
+      <time datetime="{{ r.date }}" class="muted">{{ r.date }}</time>
+    </header>
+    {% if !r.notes_html.is_empty() %}<div class="prose">{{ r.notes_html|safe }}</div>{% endif %}
+    {% if r.files.is_empty() %}
+    <p class="muted">No files in this release yet.</p>
+    {% else %}
+    <ul class="file-list">
+      {% for f in r.files %}
+      <li class="file">
+        <div class="file-info">
+          <span class="file-name">{{ f.filename }}</span>
+          <span class="file-meta">{{ f.size }} · {{ f.downloads }} download{% if f.downloads != 1 %}s{% endif %}</span>
+          <span class="file-hash"><a href="{{ f.sha256_url }}" class="hash-label">SHA-256</a> <code class="hash">{{ f.sha256 }}</code></span>
+          <span class="file-hash">{% if let Some(url) = f.sha512_url %}<a href="{{ url }}" class="hash-label">SHA-512</a>{% else %}<span class="hash-label">SHA-512</span>{% endif %} <code class="hash">{% if let Some(h) = f.sha512 %}{{ h }}{% else %}n/a{% endif %}</code></span>
+        </div>
+        <div class="file-actions">
+          <a class="btn btn-download glow" href="{{ f.download_url }}" download>Download</a>
+          {% for m in f.mirrors %}<a class="btn" href="{{ m.url }}" rel="noopener noreferrer nofollow">{{ m.text }}</a>{% endfor %}
+          {% if let Some(t) = f.torrent_url %}<a class="btn" href="{{ t }}">Torrent</a>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="checksums">
+      <a href="{{ r.sha256sums_url }}">SHA256SUMS</a> · <a href="{{ r.sha512sums_url }}">SHA512SUMS</a>
+      {% if let Some(sig) = r.signature_url %} · <a href="{{ sig }}">SHA256SUMS.asc</a>{% if has_gpg_key %} (<a href="/gpg.pub">signing key</a>){% endif %}{% endif %}
+      <span class="muted">· verify the downloaded files with</span> <code class="hash">{{ r.verify_hint }}</code>
+    </p>
+    {% endif %}
+  </section>
+  {% endfor %}
+</article>
+{% endblock %}

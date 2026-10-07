@@ -1,0 +1,333 @@
+//! Small pure helpers: filename sanitizing, slugs, sizes, tokens, URLs.
+
+use sha2::{Digest, Sha256};
+
+/// Turns an untrusted client-supplied filename into a safe display name.
+///
+/// Keeps only the final path component, replaces anything outside a
+/// conservative ASCII set with `_`, strips leading dots (no hidden files, no
+/// `..`), and caps the length while preserving a short extension. The result
+/// is only ever used for display and Content-Disposition; files are stored
+/// under a generated UUID key, never under this name.
+pub fn sanitize_filename(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let mapped: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-+()[]~ ,@=".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut name = mapped.trim().trim_start_matches('.').trim().to_string();
+
+    const MAX: usize = 200;
+    if name.len() > MAX {
+        // ASCII-only at this point, so byte slicing is safe.
+        let ext = match name.rfind('.') {
+            Some(i) if name.len() - i <= 16 => name[i..].to_string(),
+            _ => String::new(),
+        };
+        name.truncate(MAX - ext.len());
+        name.push_str(&ext);
+    }
+    if name.is_empty() {
+        "file".to_string()
+    } else {
+        name
+    }
+}
+
+/// Builds a URL slug from a project name: lowercase ASCII letters, digits and
+/// single dashes, at most 64 characters.
+pub fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.truncate(64);
+    slug.trim_end_matches('-').to_string()
+}
+
+/// True if `s` is a well-formed slug (what [`slugify`] produces).
+pub fn is_valid_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--")
+}
+
+/// Formats a byte count with binary units, e.g. `4.7 GiB`.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Fills `buf` from the operating system's CSPRNG (getrandom). Aborts if
+/// the OS cannot provide randomness: never fall back to anything weaker.
+pub fn os_random(buf: &mut [u8]) {
+    getrandom::fill(buf).expect("the OS random number generator is unavailable");
+}
+
+/// 256 random bits from the OS CSPRNG, hex encoded (session tokens, CSRF).
+pub fn random_token() -> String {
+    let mut buf = [0u8; 32];
+    os_random(&mut buf);
+    hex::encode(buf)
+}
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
+/// Constant-time string comparison for secrets such as CSRF tokens.
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// The one place a download URL is built. `base` is the normalized
+/// DOWNLOAD_BASE_URL (no trailing slash) or empty for a same-host relative link.
+pub fn build_download_url(base: &str, file_id: i64) -> String {
+    format!("{base}/download/{file_id}")
+}
+
+/// Characters left unescaped in a URL path segment (RFC 3986 unreserved).
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Percent-encodes free text (e.g. a release version) for use as a single
+/// URL path segment. All-dot segments are fully encoded so clients cannot
+/// collapse them as `.` / `..`.
+pub fn encode_path_segment(s: &str) -> String {
+    if !s.is_empty() && s.bytes().all(|b| b == b'.') {
+        return "%2E".repeat(s.len());
+    }
+    percent_encoding::utf8_percent_encode(s, PATH_SEGMENT).to_string()
+}
+
+/// RFC 5987 attr-char: everything else in `filename*` is percent-encoded.
+const ATTR_CHAR: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'!')
+    .remove(b'#')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'+')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'^')
+    .remove(b'_')
+    .remove(b'`')
+    .remove(b'|')
+    .remove(b'~');
+
+/// `Content-Disposition: attachment` per RFC 6266: an ASCII fallback
+/// `filename` (no quotes, backslashes, separators or control characters)
+/// plus the exact name as RFC 5987 `filename*`. Header-injection safe for
+/// any input: CR/LF can never reach the header unencoded.
+pub fn content_disposition(name: &str) -> String {
+    let fallback: String = name
+        .chars()
+        .map(|c| match c {
+            ' ' => ' ',
+            '"' | '\\' | ';' | '%' => '_',
+            c if c.is_ascii_graphic() => c,
+            _ => '_',
+        })
+        .collect();
+    let fallback = fallback.trim();
+    let fallback = if fallback.is_empty() {
+        "download"
+    } else {
+        fallback
+    };
+    let encoded = percent_encoding::utf8_percent_encode(name, ATTR_CHAR);
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
+/// Absolute download URL for a torrent web seed (BEP 19). Needs an absolute
+/// base: DOWNLOAD_BASE_URL if set, else PUBLIC_URL; None if neither is set.
+pub fn build_torrent_web_seed_url(
+    download_base: &str,
+    public_url: Option<&str>,
+    file_id: i64,
+) -> Option<String> {
+    let base = if download_base.is_empty() {
+        public_url?
+    } else {
+        download_base
+    };
+    Some(build_download_url(base.trim_end_matches('/'), file_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_directories() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename(r"C:\Users\x\evil.exe"), "evil.exe");
+        assert_eq!(sanitize_filename("/abs/path/disk.iso"), "disk.iso");
+    }
+
+    #[test]
+    fn sanitize_rejects_dot_names() {
+        assert_eq!(sanitize_filename(".."), "file");
+        assert_eq!(sanitize_filename("."), "file");
+        assert_eq!(sanitize_filename(""), "file");
+        assert_eq!(sanitize_filename("dir/"), "file");
+        assert_eq!(sanitize_filename(".bashrc"), "bashrc");
+        assert_eq!(sanitize_filename("...hidden.txt"), "hidden.txt");
+    }
+
+    #[test]
+    fn sanitize_replaces_unsafe_characters() {
+        assert_eq!(sanitize_filename("my file (1).iso"), "my file (1).iso");
+        assert_eq!(sanitize_filename("naïve.txt"), "na_ve.txt");
+        assert_eq!(sanitize_filename("a\"b;c\r\n.txt"), "a_b_c__.txt");
+        assert_eq!(sanitize_filename("nul\0byte"), "nul_byte");
+        assert_eq!(sanitize_filename("%2e%2e"), "_2e_2e");
+    }
+
+    #[test]
+    fn sanitize_caps_length_and_keeps_extension() {
+        let long = format!("{}.iso", "a".repeat(500));
+        let s = sanitize_filename(&long);
+        assert_eq!(s.len(), 200);
+        assert!(s.ends_with(".iso"));
+    }
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slugify("My Cool Distro 2.0!"), "my-cool-distro-2-0");
+        assert_eq!(slugify("  --Hello__World--  "), "hello-world");
+        assert_eq!(slugify("Ünïcode"), "n-code");
+        assert_eq!(slugify("!!!"), "");
+        assert_eq!(slugify(&"x ".repeat(100)).len(), 63);
+        assert!(is_valid_slug("abc-123"));
+        assert!(!is_valid_slug("Abc"));
+        assert!(!is_valid_slug("-abc"));
+        assert!(!is_valid_slug("a--b"));
+        assert!(!is_valid_slug("a/b"));
+        assert!(!is_valid_slug(""));
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(5 * 1024 * 1024 * 1024 / 2), "2.5 GiB");
+    }
+
+    #[test]
+    fn tokens_and_compare() {
+        let a = random_token();
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, random_token());
+        assert!(ct_eq(&a, &a.clone()));
+        assert!(!ct_eq(&a, &random_token()));
+        assert!(!ct_eq("abc", "abcd"));
+    }
+
+    #[test]
+    fn path_segments() {
+        assert_eq!(encode_path_segment("1.0.2-rc1"), "1.0.2-rc1");
+        assert_eq!(
+            encode_path_segment("1.0 beta/2?x#y"),
+            "1.0%20beta%2F2%3Fx%23y"
+        );
+        assert_eq!(encode_path_segment(".."), "%2E%2E");
+        assert_eq!(encode_path_segment("ü"), "%C3%BC");
+    }
+
+    #[test]
+    fn content_disposition_is_injection_safe() {
+        assert_eq!(
+            content_disposition("cool distro 1.0.iso"),
+            "attachment; filename=\"cool distro 1.0.iso\"; filename*=UTF-8''cool%20distro%201.0.iso"
+        );
+        for hostile in [
+            "a.iso\r\nSet-Cookie: x=1",
+            "a\".iso",
+            "a\\b.iso",
+            "a;filename=evil.exe",
+            "naïve-日本.iso",
+            "\u{0}.iso",
+            "%0d%0a.iso",
+            "   ",
+        ] {
+            let v = content_disposition(hostile);
+            assert!(
+                axum::http::HeaderValue::from_str(&v).is_ok(),
+                "{hostile:?} -> {v}"
+            );
+            assert!(!v.contains('\r') && !v.contains('\n'), "{v}");
+            let (quoted, star) = v.split_once("; filename*=UTF-8''").unwrap();
+            let inner = quoted
+                .strip_prefix("attachment; filename=\"")
+                .unwrap()
+                .strip_suffix('"')
+                .unwrap();
+            assert!(
+                !inner.contains('"') && !inner.contains(';') && !inner.contains('\\'),
+                "{v}"
+            );
+            assert!(
+                star.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "%!#$&+-.^_`|~".contains(c)),
+                "{v}"
+            );
+        }
+        assert!(content_disposition("naïve.iso").ends_with("filename*=UTF-8''na%C3%AFve.iso"));
+        assert!(content_disposition("   ").contains("filename=\"download\""));
+    }
+
+    #[test]
+    fn download_urls() {
+        assert_eq!(build_download_url("", 7), "/download/7");
+        assert_eq!(
+            build_download_url("https://dl.example.com", 7),
+            "https://dl.example.com/download/7"
+        );
+        assert_eq!(build_torrent_web_seed_url("", None, 7), None);
+        assert_eq!(
+            build_torrent_web_seed_url("", Some("https://files.example.com"), 7).as_deref(),
+            Some("https://files.example.com/download/7")
+        );
+        assert_eq!(
+            build_torrent_web_seed_url(
+                "https://dl.example.com",
+                Some("https://files.example.com"),
+                7
+            )
+            .as_deref(),
+            Some("https://dl.example.com/download/7")
+        );
+    }
+}

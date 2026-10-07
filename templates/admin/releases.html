@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+{% let base = l.base() %}
+<p class="crumbs"><a href="{{ base }}/projects">Projects</a> /</p>
+<h1>{{ project.name }}: releases {% let rs = project.review_status.as_str() %}{% include "admin/_review_badge.html" %}</h1>
+{% if let Some(n) = project.review_note %}<p class="alert alert-error">Administrator's note on the project: {{ n }}</p>{% endif %}
+<p class="actions">
+  {% if project.review_status == "approved" %}<a class="btn" href="/p/{{ project.slug }}">View public page</a>{% endif %}
+  <a class="btn" href="{{ base }}/projects/{{ project.id }}/edit">Edit project</a>
+</p>
+{% if releases.is_empty() %}
+<p class="muted">No releases yet.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th scope="col">Version</th><th scope="col">Date</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+  <tbody>
+  {% for r in releases %}
+  <tr>
+    <td>{{ r.version }}</td>
+    <td>{{ r.date }}</td>
+    <td>{% let rs = r.review_status.as_str() %}{% include "admin/_review_badge.html" %}
+      {% if !r.review_note.is_empty() %}<span class="review-note">{{ r.review_note }}</span>{% endif %}</td>
+    <td class="row-actions">
+      <a class="btn btn-small" href="{{ base }}/releases/{{ r.id }}/files">Files</a>
+      <a class="btn btn-small" href="{{ base }}/releases/{{ r.id }}/edit">Edit</a>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+<section class="card">
+  <h2>New release</h2>
+  {% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+  <form method="post" action="{{ base }}/projects/{{ project.id }}/releases" class="form">
+    {% include "admin/_release_fields.html" %}
+    <button type="submit" class="btn btn-primary glow">Create release</button>
+  </form>
+</section>
+{% endblock %}

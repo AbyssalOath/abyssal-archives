@@ -1,0 +1,19 @@
+# install.sh writes ./Caddyfile for you (option 2). Two shapes:
+
+# 1) A public domain: Caddy obtains a Let's Encrypt certificate automatically.
+#    Ports 80 and 443 must be reachable from the internet.
+files.example.com {
+    header -Server
+    reverse_proxy app:8080
+}
+
+# 2) No public domain (hostname or IP on a LAN): Caddy's own internal CA.
+#    Browsers will warn until Caddy's root certificate is imported; see README.
+# {
+#     default_sni 10.0.0.5
+# }
+# 10.0.0.5 {
+#     tls internal
+#     header -Server
+#     reverse_proxy app:8080
+# }

@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block content %}
+{% let csrf = l.csrf() %}
+<p class="crumbs"><a href="/admin/projects">Projects</a> / <a href="/admin/projects/{{ project.id }}/releases">{{ project.name }}</a> / <a href="/admin/releases/{{ release.id }}/files">{{ release.version }}</a> /</p>
+<h1>Mirrors of {{ file.filename }}</h1>
+{% if !sharing_enabled %}
+<p class="alert">External sharing is <strong>off</strong>: no mirror or torrent link is shown publicly, whatever its status.
+  Turn on "Show approved mirrors" in <a href="/admin/settings">Settings</a> to publish approved ones.</p>
+{% endif %}
+{% if let Some(m) = flash %}<p class="alert alert-ok" role="status">{{ m }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+
+<section class="card">
+  <h2>Mirrors</h2>
+  {% if mirrors.is_empty() %}
+  <p class="muted">No mirrors yet.</p>
+  {% else %}
+  <ul class="file-list">
+    {% for m in mirrors %}
+    <li class="file">
+      <div class="file-info">
+        <span class="file-name">{{ m.label }} <span class="status status-{{ m.status }}">{{ m.status }}</span> <span class="badge">{{ m.kind }}</span>{% if m.kind == "torrent" %} <span class="badge">unverified</span>{% endif %}</span>
+        <span class="file-hash"><code>{{ m.url }}</code></span>
+        <span class="file-meta">Source: {{ m.source }}{% if !m.last_checked.is_empty() %} · last verified {{ m.last_checked }}{% endif %}{% if m.verifying %} · verifying…{% endif %}</span>
+        {% if !m.last_error.is_empty() %}<span class="file-meta error-text">{{ m.last_error }}</span>{% endif %}
+      </div>
+      <div class="file-admin-actions">
+        {% if m.status != "approved" %}
+        <form method="post" action="/admin/mirrors/{{ m.id }}/approve" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small">Approve</button></form>
+        {% endif %}
+        {% if m.status != "rejected" %}
+        <form method="post" action="/admin/mirrors/{{ m.id }}/reject" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small">Reject</button></form>
+        {% endif %}
+        {% if m.kind == "http" && !m.verifying %}
+        <form method="post" action="/admin/mirrors/{{ m.id }}/verify" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small">Verify</button></form>
+        {% endif %}
+        <form method="post" action="/admin/mirrors/{{ m.id }}/delete" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small btn-danger">Delete</button></form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted">Verify downloads an http mirror once, in the background, and compares its SHA-256 with ours. A mismatch or
+    error marks the mirror failed and hides it publicly. Verify never runs automatically, and refuses internal or private
+    addresses. Torrent links cannot be verified.</p>
+  {% endif %}
+</section>
+
+{% if !previews.is_empty() %}
+<section class="card">
+  <h2>Confirm built URL{% if previews.len() > 1 %}s{% endif %}</h2>
+  <p class="muted">Built from what you typed (no network request was made). Check before adding.</p>
+  {% for p in previews %}
+  <form method="post" action="/admin/files/{{ file.id }}/mirrors" class="form danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="kind" value="{{ p.kind }}">
+    <input type="hidden" name="url" value="{{ p.url }}">
+    <p><span class="badge">{{ p.kind }}</span> <code class="hash">{{ p.url }}</code><br><span class="muted">{{ p.note }}</span></p>
+    <label for="label-{{ loop.index }}">Label</label>
+    <input id="label-{{ loop.index }}" name="label" value="{{ p.label }}" maxlength="100">
+    <button type="submit" class="btn btn-primary">Add this mirror</button>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Add a mirror</h2>
+  <form method="post" action="/admin/files/{{ file.id }}/mirrors" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="kind">Kind</label>
+    <select id="kind" name="kind">
+      <option value="http"{% if form.kind != "torrent" %} selected{% endif %}>http: direct download of this same file</option>
+      <option value="torrent"{% if form.kind == "torrent" %} selected{% endif %}>torrent: link to a .torrent file or a magnet: link</option>
+    </select>
+    <label for="url">URL</label>
+    <input id="url" name="url" value="{{ form.url }}" required maxlength="2048" placeholder="https://… or magnet:?xt=urn:btih:…">
+    <label for="label">Label <span class="muted">(shown as "Mirror (label)"; blank = host name)</span></label>
+    <input id="label" name="label" value="{{ form.label }}" maxlength="100">
+    <button type="submit" class="btn btn-primary glow">Add mirror</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Quick add</h2>
+  <p class="muted">Builds the URL for you; nothing is fetched and no account or API key is used. See docs/MIRRORS.md.</p>
+  <form method="post" action="/admin/files/{{ file.id }}/mirrors/quick" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="source" value="archive">
+    <h3>Archive.org item</h3>
+    <label for="identifier">Item identifier <span class="muted">(archive.org/details/<strong>identifier</strong>)</span></label>
+    <input id="identifier" name="identifier" required maxlength="100" pattern="[A-Za-z0-9._\-]+">
+    <label for="ia-filename">File name in the item <span class="muted">(blank = {{ file.filename }})</span></label>
+    <input id="ia-filename" name="filename" maxlength="255">
+    <button type="submit" class="btn">Build Archive.org URLs</button>
+  </form>
+  <form method="post" action="/admin/files/{{ file.id }}/mirrors/quick" class="form danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="source" value="github">
+    <h3>GitHub release asset</h3>
+    <label for="owner">Owner</label>
+    <input id="owner" name="owner" required maxlength="100">
+    <label for="repo">Repository</label>
+    <input id="repo" name="repo" required maxlength="100">
+    <label for="tag">Release tag</label>
+    <input id="tag" name="tag" required maxlength="255">
+    <label for="asset">Asset name <span class="muted">(blank = {{ file.filename }})</span></label>
+    <input id="asset" name="asset" maxlength="255">
+    <button type="submit" class="btn">Build GitHub URL</button>
+  </form>
+</section>
+{% endblock %}

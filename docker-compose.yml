@@ -1,0 +1,222 @@
+# All names derive from COMPOSE_PROJECT_NAME (set in .env by install.sh), so
+# several sites can run side by side on one host.
+#
+# Images are pinned by digest (Dependabot proposes updates); the tag is
+# informational. Hardening: see docs/SECURITY-REVIEW.md.
+name: ${COMPOSE_PROJECT_NAME:-filehost}
+
+networks:
+  # MariaDB and the app only; no route to the outside world.
+  backend:
+    internal: true
+  # The app and Caddy (and the app's outbound mirror Verify).
+  frontend: {}
+  # gluetun + qBittorrent (profile "seeder"); the app never joins it.
+  seeder: {}
+
+services:
+  mariadb:
+    image: mariadb:11.8@sha256:6422478cb8e159f080fb1d8ccf65101e26fe51385787fde7d16c3b165a331f15
+    container_name: ${COMPOSE_PROJECT_NAME:-filehost}-mariadb
+    restart: unless-stopped
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:?set MARIADB_DATABASE in .env}
+      MARIADB_USER: ${MARIADB_USER:?set MARIADB_USER in .env}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+    # No host port by default. DB_PUBLISH=true (install.sh) adds
+    # docker-compose.db-publish.yml, which publishes it on 127.0.0.1 only.
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  app:
+    build: .
+    image: ${COMPOSE_PROJECT_NAME:-filehost}-app:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-filehost}-app
+    restart: unless-stopped
+    networks: [backend, frontend]
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: ${APP_PIDS_LIMIT:-256}
+    mem_limit: ${APP_MEMORY_LIMIT:-1g}
+    cpus: ${APP_CPUS:-2}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    # Only what the app needs is passed in (not the MariaDB root password).
+    environment:
+      DATABASE_URL: mysql://${MARIADB_USER}:${MARIADB_PASSWORD}@mariadb:3306/${MARIADB_DATABASE}
+      SITE_NAME: ${SITE_NAME:?set SITE_NAME in .env}
+      SITE_TAGLINE: ${SITE_TAGLINE:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      DOWNLOAD_BASE_URL: ${DOWNLOAD_BASE_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      STORAGE_PATH: ${STORAGE_PATH:-/data/storage}
+      INCOMING_PATH: ${INCOMING_PATH:-/data/incoming}
+      IMPORT_MIN_AGE_SECS: ${IMPORT_MIN_AGE_SECS:-30}
+      ALLOW_WEB_UPLOAD: ${ALLOW_WEB_UPLOAD:-true}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-90000000}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      TORRENT_ENABLED: ${TORRENT_ENABLED:-false}
+      TORRENT_TRACKERS: ${TORRENT_TRACKERS:-}
+      TORRENT_PIECE_LENGTH: ${TORRENT_PIECE_LENGTH:-4194304}
+      SIGN_CHECKSUMS: ${SIGN_CHECKSUMS:-false}
+      STRIP_METADATA: ${STRIP_METADATA:-false}
+      EXTERNAL_MIRRORS_ENABLED: ${EXTERNAL_MIRRORS_ENABLED:-false}
+      TORRENT_DHT_ENABLED: ${TORRENT_DHT_ENABLED:-false}
+      MIRROR_DISCOVERY_ENABLED: ${MIRROR_DISCOVERY_ENABLED:-false}
+      FEDERATION_ENABLED: ${FEDERATION_ENABLED:-false}
+      # For the future qBittorrent integration (src/seeder.rs); unused today.
+      QBT_URL: ${QBT_URL:-}
+      QBT_USERNAME: ${QBT_USERNAME:-admin}
+      QBT_PASSWORD: ${QBT_PASSWORD:-}
+      # Security settings (defaults are the safe ones; see .env.example).
+      SESSION_IDLE_TIMEOUT_MINS: ${SESSION_IDLE_TIMEOUT_MINS:-30}
+      SESSION_ABSOLUTE_TIMEOUT_HOURS: ${SESSION_ABSOLUTE_TIMEOUT_HOURS:-12}
+      ARGON2_MEMORY_KIB: ${ARGON2_MEMORY_KIB:-19456}
+      ARGON2_ITERATIONS: ${ARGON2_ITERATIONS:-2}
+      ARGON2_PARALLELISM: ${ARGON2_PARALLELISM:-1}
+      TOTP_ENABLED: ${TOTP_ENABLED:-false}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,::1/128,172.16.0.0/12}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-x-forwarded-for}
+      ADMIN_ALLOWED_CIDRS: ${ADMIN_ALLOWED_CIDRS:-}
+      ADMIN_HOST: ${ADMIN_HOST:-}
+      SETUP_ENABLED: ${SETUP_ENABLED:-true}
+      HSTS_ENABLED: ${HSTS_ENABLED:-false}
+      HSTS_INCLUDE_SUBDOMAINS: ${HSTS_INCLUDE_SUBDOMAINS:-false}
+      LOG_IP_MODE: ${LOG_IP_MODE:-truncated}
+      REQUEST_TIMEOUT_SECS: ${REQUEST_TIMEOUT_SECS:-30}
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS:-1024}
+      MAX_CONNECTIONS_PER_IP: ${MAX_CONNECTIONS_PER_IP:-64}
+      DOWNLOAD_MAX_CONCURRENT: ${DOWNLOAD_MAX_CONCURRENT:-64}
+      DOWNLOAD_MAX_PER_IP: ${DOWNLOAD_MAX_PER_IP:-4}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-600}
+      IMPORT_CONCURRENCY: ${IMPORT_CONCURRENCY:-1}
+      STORAGE_MIN_FREE_BYTES: ${STORAGE_MIN_FREE_BYTES:-1G}
+      VERIFY_PROXY_URL: ${VERIFY_PROXY_URL:-}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    # Host bind mounts, owned by the container user (UID/GID 10001), so files
+    # can be rsynced straight into the incoming folder. Two separate mounts
+    # never share a mount point, so imports copy rather than rename; see
+    # docs/IMPORT.md for the single-mount variant that makes imports instant.
+    volumes:
+      - ${STORAGE_HOST_PATH:-./data/storage}:${STORAGE_PATH:-/data/storage}
+      - ${INCOMING_HOST_PATH:-./data/incoming}:${INCOMING_PATH:-/data/incoming}
+    ports:
+      - "${APP_HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}:8080"
+
+  caddy:
+    image: caddy:2.11.7@sha256:f2a1290d0463aad60660d4ec134943f183ee2a5f6c3eb7bf32dd984f2f020772
+    profiles: ["caddy"]
+    container_name: ${COMPOSE_PROJECT_NAME:-filehost}-caddy
+    restart: unless-stopped
+    networks: [frontend]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # ---- Optional self-seeding through a VPN (profile "seeder", OFF by default) ----
+  # Read docs/TORRENTS.md first. qBittorrent shares gluetun's network stack
+  # (network_mode below), so ALL its traffic goes through the VPN; gluetun's
+  # firewall blocks everything when the VPN is down (kill switch), and
+  # qBittorrent is additionally bound to the VPN interface. The app
+  # container never joins this network.
+  gluetun:
+    image: qmcgaw/gluetun:v3.41.3@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
+    profiles: ["seeder"]
+    container_name: ${COMPOSE_PROJECT_NAME:-filehost}-gluetun
+    restart: unless-stopped
+    networks: [seeder]
+    security_opt: ["no-new-privileges:true"]
+    # Only gluetun gets NET_ADMIN (to set up the tunnel and its firewall).
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-}
+      VPN_TYPE: ${VPN_TYPE:-openvpn}
+      OPENVPN_USER: ${OPENVPN_USER:-}
+      OPENVPN_PASSWORD: ${OPENVPN_PASSWORD:-}
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:-}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:-}
+      SERVER_COUNTRIES: ${SERVER_COUNTRIES:-}
+      # Port forwarding (the provider must support it, see docs/TORRENTS.md).
+      # When a port is forwarded, qBittorrent is told to listen on it, bound
+      # to the VPN interface; when it goes away, qBittorrent is rebound to
+      # "lo" (no connectivity). Commands follow the gluetun wiki
+      # (setup/advanced/vpn-port-forwarding.md) and need qBittorrent's
+      # "bypass authentication for localhost", pre-seeded by install.sh.
+      VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING:-on}
+      VPN_PORT_FORWARDING_UP_COMMAND: >-
+        /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
+        "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"{{VPN_INTERFACE}}\",\"random_port\":false,\"upnp\":false}"
+        http://127.0.0.1:8081/api/v2/app/setPreferences'
+      VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+        /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
+        "json={\"listen_port\":0,\"current_network_interface\":\"lo\"}"
+        http://127.0.0.1:8081/api/v2/app/setPreferences'
+      TZ: ${TZ:-UTC}
+    volumes:
+      - gluetun_data:/gluetun
+    # The qBittorrent Web UI is published on gluetun (whose network stack
+    # qBittorrent uses) and ONLY on the host's loopback: reach it through an
+    # SSH tunnel. Nothing else is published.
+    ports:
+      - "127.0.0.1:${QBT_WEBUI_PORT:-8081}:8081"
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.4_v2.0.15-ls479@sha256:b522f9f4b769f8f36d49d22d5eb6a92e9aa18904c6a1830b1439df511ec21983
+    profiles: ["seeder"]
+    container_name: ${COMPOSE_PROJECT_NAME:-filehost}-qbittorrent
+    restart: unless-stopped
+    # No NET_ADMIN or anything else beyond what the image's init needs to
+    # drop to PUID/PGID 10001. Its config must stay writable.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      PUID: "10001"
+      PGID: "10001"
+      WEBUI_PORT: "8081"
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Pre-seeded by install.sh (qBittorrent/qBittorrent.conf).
+      - ${QBT_CONFIG_HOST_PATH:-./data/qbittorrent}:/config
+      # Seeds straight from storage, read-only.
+      - ${STORAGE_HOST_PATH:-./data/storage}:/data/storage:ro
+
+volumes:
+  gluetun_data:
+  db_data:
+  caddy_data:
+  caddy_config:

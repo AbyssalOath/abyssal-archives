@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Review</h1>
+{% if let Some(m) = flash %}<p class="alert alert-ok" role="status">{{ m }}</p>{% endif %}
+<p class="muted">Member projects and releases stay hidden until you publish them.
+  Review is {% if review_on %}<strong>on</strong>: every new or changed item lands here{% else %}<strong>off</strong>: members publish
+  directly, only items from before stay here{% endif %} (<a href="/admin/settings">Settings</a>).</p>
+
+<section class="card">
+  <h2>Projects ({{ projects.len() }})</h2>
+  {% if projects.is_empty() %}<p class="muted">Nothing waiting.</p>{% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th scope="col">Project</th><th scope="col">Owner</th><th scope="col">Since</th><th scope="col">Actions</th></tr></thead>
+    <tbody>
+    {% for p in projects %}
+    <tr>
+      <td>{{ p.project_name }}</td>
+      <td>{% if let Some(o) = p.owner %}{{ o }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{{ p.created_at.format("%Y-%m-%d") }}</td>
+      <td class="row-actions">
+        <a class="btn btn-small" href="/admin/projects/{{ p.id }}/edit">Check and decide</a>
+        <a class="btn btn-small" href="/admin/projects/{{ p.id }}/releases">Releases</a>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Releases ({{ releases.len() }})</h2>
+  <p class="muted">A release is public once both it and its project are published. Uploads and edits by the owner send it back here.</p>
+  {% if releases.is_empty() %}<p class="muted">Nothing waiting.</p>{% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th scope="col">Project</th><th scope="col">Version</th><th scope="col">Owner</th><th scope="col">Since</th><th scope="col">Actions</th></tr></thead>
+    <tbody>
+    {% for r in releases %}
+    <tr>
+      <td>{{ r.project_name }}</td>
+      <td>{{ r.version }}</td>
+      <td>{% if let Some(o) = r.owner %}{{ o }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{{ r.created_at.format("%Y-%m-%d") }}</td>
+      <td class="row-actions"><a class="btn btn-small" href="/admin/releases/{{ r.id }}/files">Check files and decide</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

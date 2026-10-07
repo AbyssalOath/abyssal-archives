@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+{% let base = l.base() %}
+<h1>{% if l.is_admin() %}Projects{% else %}My projects{% endif %}</h1>
+{% include "admin/_usage.html" %}
+{% if projects.is_empty() %}
+<p class="muted">No projects yet. Create the first one below.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th scope="col">Name</th><th scope="col">Slug</th>{% if l.is_admin() %}<th scope="col">Owner</th>{% endif %}<th scope="col">Latest</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+  <tbody>
+  {% for p in projects %}
+  <tr>
+    <td>{% if p.review_status == "approved" %}<a href="/p/{{ p.slug }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}</td>
+    <td><code>{{ p.slug }}</code></td>
+    {% if l.is_admin() %}<td>{% if let Some(o) = p.owner %}{{ o }}{% else %}<span class="muted">none</span>{% endif %}</td>{% endif %}
+    <td>{% if let Some(v) = p.latest_version %}{{ v }}{% else %}<span class="muted">none</span>{% endif %}</td>
+    <td>{% let rs = p.review_status.as_str() %}{% include "admin/_review_badge.html" %}
+      {% if let Some(n) = p.review_note %}<span class="review-note">{{ n }}</span>{% endif %}</td>
+    <td class="row-actions">
+      <a class="btn btn-small" href="{{ base }}/projects/{{ p.id }}/releases">Releases</a>
+      <a class="btn btn-small" href="{{ base }}/projects/{{ p.id }}/edit">Edit</a>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>New project</h2>
+  {% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+  <form method="post" action="{{ base }}/projects" class="form">
+    {% include "admin/_project_fields.html" %}
+    <button type="submit" class="btn btn-primary glow">Create project</button>
+  </form>
+</section>
+{% endblock %}

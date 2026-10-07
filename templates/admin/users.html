@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block content %}
+{% let csrf = l.csrf() %}
+<h1>Users</h1>
+{% if let Some(m) = flash %}<p class="alert alert-ok" role="status">{{ m }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+
+<section class="card">
+  <h2>Account requests ({{ pending.len() }})</h2>
+  <p class="muted">Registration requests are {% if registration_open %}<strong>open</strong>{% else %}<strong>closed</strong>
+    (/register shows the "requests suspended" notice){% endif %}. Change it in <a href="/admin/settings">Settings</a>.
+    Applicants get no e-mail: they find out by signing in.</p>
+  {% if pending.is_empty() %}<p class="muted">No requests waiting.</p>{% else %}
+  <ul class="file-list">
+    {% for u in pending %}
+    <li class="file">
+      <div class="file-info">
+        <span class="file-name">{{ u.username }} <span class="status status-pending">pending</span></span>
+        <span class="file-meta">Requested {{ u.created }}</span>
+        {% if !u.signup_note.is_empty() %}<span class="review-note">“{{ u.signup_note }}”</span>{% endif %}
+      </div>
+      <div class="file-admin-actions">
+        <form method="post" action="/admin/users/{{ u.id }}/approve" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-small btn-primary">Approve</button>
+        </form>
+        <form method="post" action="/admin/users/{{ u.id }}/reject" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-small btn-danger">Reject</button>
+        </form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Limit requests ({{ requests.len() }})</h2>
+  {% if requests.is_empty() %}<p class="muted">No requests waiting.</p>{% else %}
+  <ul class="file-list">
+    {% for r in requests %}
+    <li class="file">
+      <div class="file-info">
+        <span class="file-name">{{ r.username }}</span>
+        <span class="file-meta">Asked {{ r.created }} for{% if !r.upload_limit.is_empty() %} upload limit <strong>{{ r.upload_limit }}</strong>{% endif %}{% if !r.upload_limit.is_empty() && !r.storage_quota.is_empty() %} and{% endif %}{% if !r.storage_quota.is_empty() %} quota <strong>{{ r.storage_quota }}</strong>{% endif %}</span>
+        <span class="review-note">“{{ r.reason }}”</span>
+      </div>
+      <form method="post" action="/admin/limit-requests/{{ r.id }}/approve" class="form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label for="ul-{{ r.id }}">Grant upload limit <span class="muted">(blank = leave as is; at most {{ max_upload }} per file applies regardless)</span></label>
+        <input id="ul-{{ r.id }}" name="upload_limit" value="{{ r.upload_input }}" maxlength="20">
+        <label for="sq-{{ r.id }}">Grant storage quota <span class="muted">(blank = leave as is)</span></label>
+        <input id="sq-{{ r.id }}" name="storage_quota" value="{{ r.quota_input }}" maxlength="20">
+        <label for="an-{{ r.id }}">Note for the member <span class="muted">(optional)</span></label>
+        <input id="an-{{ r.id }}" name="note" maxlength="500">
+        <p class="actions">
+          <button type="submit" class="btn btn-primary">Approve</button>
+          <button type="submit" formaction="/admin/limit-requests/{{ r.id }}/deny" class="btn btn-danger">Deny</button>
+        </p>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Accounts</h2>
+  <ul class="file-list">
+    {% for u in users %}
+    <li class="file">
+      <div class="file-info">
+        <span class="file-name">{{ u.username }} {% if u.is_admin %}<span class="status">administrator</span>{% else %}<span class="status status-{{ u.status }}">{{ u.status }}</span>{% endif %}</span>
+        <span class="file-meta">Since {{ u.created }} · {{ u.projects }} projects · {{ u.used }} stored{% if !u.is_admin %} · upload limit {{ u.upload_limit }} · quota {{ u.storage_quota }}{% endif %}</span>
+      </div>
+      {% if !u.is_admin %}
+      <details class="file-admin-actions">
+        <summary>Manage</summary>
+        <form method="post" action="/admin/users/{{ u.id }}/limits" class="form">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label for="lim-{{ u.id }}">Upload limit per file <span class="muted">(e.g. 500M; blank = site default)</span></label>
+          <input id="lim-{{ u.id }}" name="upload_limit" value="{{ u.upload_input }}" maxlength="20">
+          <label for="quo-{{ u.id }}">Storage quota <span class="muted">(e.g. 5G; blank = site default)</span></label>
+          <input id="quo-{{ u.id }}" name="storage_quota" value="{{ u.quota_input }}" maxlength="20">
+          <button type="submit" class="btn btn-small">Save limits</button>
+        </form>
+        <form method="post" action="/admin/users/{{ u.id }}/password" class="form">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label for="pw-{{ u.id }}">New password <span class="muted">(at least {{ min_len }} characters; ends their sessions)</span></label>
+          <input id="pw-{{ u.id }}" name="password" type="password" minlength="{{ min_len }}" autocomplete="new-password" required>
+          <label for="pwc-{{ u.id }}">Repeat</label>
+          <input id="pwc-{{ u.id }}" name="password_confirm" type="password" minlength="{{ min_len }}" autocomplete="new-password" required>
+          <button type="submit" class="btn btn-small">Set password</button>
+        </form>
+        <div class="actions">
+          {% if u.status == "disabled" %}
+          <form method="post" action="/admin/users/{{ u.id }}/enable" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small">Enable</button></form>
+          {% else %}
+          <form method="post" action="/admin/users/{{ u.id }}/disable" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small">Disable</button></form>
+          {% endif %}
+          {% if l.totp_enabled %}
+          <form method="post" action="/admin/users/{{ u.id }}/reset-2fa" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="btn btn-small">Turn off their 2FA</button></form>
+          {% endif %}
+        </div>
+        <form method="post" action="/admin/users/{{ u.id }}/delete" class="form danger-zone">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> Yes, delete {{ u.username }} with all their projects and files</label>
+          <button type="submit" class="btn btn-small btn-danger">Delete account</button>
+        </form>
+      </details>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Create a member account</h2>
+  <p class="muted">Active immediately. Tell them the username and password yourself; they can change the password under Account.</p>
+  <form method="post" action="/admin/users" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="new-username">Username</label>
+    <input id="new-username" name="username" value="{{ new_username }}" required maxlength="64" pattern="[A-Za-z0-9._\-]+" autocomplete="off">
+    <label for="new-password">Password <span class="muted">(at least {{ min_len }} characters)</span></label>
+    <input id="new-password" name="password" type="password" required minlength="{{ min_len }}" autocomplete="new-password">
+    <label for="new-password-confirm">Repeat password</label>
+    <input id="new-password-confirm" name="password_confirm" type="password" required minlength="{{ min_len }}" autocomplete="new-password">
+    <button type="submit" class="btn btn-primary glow">Create member</button>
+  </form>
+</section>
+{% endblock %}
