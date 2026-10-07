@@ -219,13 +219,17 @@ async fn full_flow() {
         "moved out of incoming"
     );
 
-    // Public project page and download.
+    // Public project page (folders summarized), release page and download.
     let public = c.get("/p/cool-distro").await;
     assert_eq!(public.status, StatusCode::OK);
-    let html = public.text();
-    assert!(html.contains("cool distro.iso"));
+    assert!(public.text().contains(">isos/</a>"), "folder summary");
+    pages.push(public.text());
+    let release_page = c.get("/p/cool-distro/1.0").await;
+    assert_eq!(release_page.status, StatusCode::OK);
+    let html = release_page.text();
+    assert!(html.contains("isos/cool distro.iso"));
     assert!(html.contains(&sha));
-    assert!(html.contains(&format!("href=\"/download/{file_id}\"")));
+    assert!(html.contains("href=\"/p/cool-distro/1.0/isos/cool%20distro.iso\""));
     assert!(!html.contains("<script"), "markdown is sanitized");
     assert!(!html.contains("Mirror"));
     assert!(!html.contains("Torrent"));
@@ -305,10 +309,11 @@ async fn full_flow() {
         ("hashing.iso", "hashing", Some("c".repeat(128))),
     ] {
         sqlx::query(
-            "INSERT INTO files (release_id, filename, size_bytes, sha256, sha512, storage_backend, storage_key, status) \
-             VALUES (?, ?, 1, ?, ?, 'local', UUID(), ?)",
+            "INSERT INTO files (release_id, filename, path, size_bytes, sha256, sha512, storage_backend, storage_key, status) \
+             VALUES (?, ?, ?, 1, ?, ?, 'local', UUID(), ?)",
         )
         .bind(release_id)
+        .bind(name)
         .bind(name)
         .bind("d".repeat(64))
         .bind(s512)
@@ -325,16 +330,16 @@ async fn full_flow() {
     );
     assert_eq!(sums.headers[header::CACHE_CONTROL], "no-cache");
     let d = "d".repeat(64);
-    // files_for_release orders by filename.
+    // Paths (folders kept), sorted.
     assert_eq!(
         sums.text(),
-        format!("{sha}  cool distro.iso\n{d}  evil_ffff  /etc/passwd\n{d}  legacy.iso\n")
+        format!("{d}  evil_ffff  /etc/passwd\n{sha}  isos/cool distro.iso\n{d}  legacy.iso\n")
     );
     let sums512 = anon.get("/p/cool-distro/1.0/SHA512SUMS").await.text();
     assert_eq!(
         sums512,
         format!(
-            "{sha512}  cool distro.iso\n{}  evil_ffff  /etc/passwd\n",
+            "{}  evil_ffff  /etc/passwd\n{sha512}  isos/cool distro.iso\n",
             "e".repeat(128)
         ),
         "legacy rows without SHA-512 are omitted"
@@ -352,7 +357,7 @@ async fn full_flow() {
         anon.get("/p/cool-distro/1.0/SHA256SUMS.asc").await.status,
         StatusCode::NOT_FOUND
     );
-    let public = c.get("/p/cool-distro").await.text();
+    let public = c.get("/p/cool-distro/1.0").await.text();
     assert!(public.contains(&sha512));
     assert!(public.contains("href=\"/p/cool-distro/1.0/SHA256SUMS\""));
     assert!(public.contains("href=\"/p/cool-distro/1.0/SHA512SUMS\""));
@@ -516,7 +521,7 @@ async fn full_flow() {
             .unwrap();
     }
     // Sharing off (default): no mirror links at all.
-    let public = c.get("/p/cool-distro").await.text();
+    let public = c.get("/p/cool-distro/1.0").await.text();
     assert!(!public.contains("mirror.example.org"));
     assert!(!public.contains("Torrent ("));
     // Turn on EXTERNAL_MIRRORS_ENABLED in settings.
@@ -532,7 +537,7 @@ async fn full_flow() {
         )
         .await;
     assert_eq!(on.status, StatusCode::OK);
-    let public = c.get("/p/cool-distro").await.text();
+    let public = c.get("/p/cool-distro/1.0").await.text();
     assert!(public.contains(
         "href=\"https://mirror.example.org/x.iso\" rel=\"noopener noreferrer nofollow\">Mirror (mirror.example.org)</a>"
     ));
@@ -619,7 +624,7 @@ async fn full_flow() {
     c.post_form(&format!("/admin/mirrors/{m}/reject"), &[("csrf", &csrf)])
         .await;
     assert!(
-        !c.get("/p/cool-distro")
+        !c.get("/p/cool-distro/1.0")
             .await
             .text()
             .contains("mirror.example.org")
@@ -653,9 +658,11 @@ async fn full_flow() {
     let public = c.get("/p/cool-distro").await.text();
     assert!(public.contains("<title>Cool Distro · Renamed Site</title>"));
     assert!(public.contains("Footer!"));
-    assert!(public.contains(&format!(
-        "href=\"https://dl.example.com/download/{file_id}\""
-    )));
+    let release_page = c.get("/p/cool-distro/1.0").await.text();
+    assert!(
+        release_page
+            .contains("href=\"https://dl.example.com/p/cool-distro/1.0/isos/cool%20distro.iso\"")
+    );
     assert!(!public.contains("Test Site"));
     let override_set: Option<String> =
         sqlx::query_scalar("SELECT `value` FROM site_settings WHERE `key` = 'override.site_name'")

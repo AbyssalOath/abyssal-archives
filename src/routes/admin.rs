@@ -6,8 +6,6 @@
 //! projects; see docs/MEMBERS.md). They take [`Actor`]; the admin-only ones
 //! (import, mirrors, signatures, settings, ...) take [`AdminUser`].
 
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use askama::Template;
@@ -25,12 +23,12 @@ use super::auth::{Actor, AdminUser};
 use crate::config::parse_size;
 use crate::config::{Config, validate_base_url};
 use crate::db::models::{
-    FileRow, Mirror, Project, Release, Stats, WorkspaceProject, review, status,
+    FileRow, ImportBatch, Mirror, Project, Release, Stats, WorkspaceProject, review, status,
 };
 use crate::db::queries::{self, NewFile, NewMirror, ProjectInput, is_unique_violation};
 use crate::error::AppError;
-use crate::fsid::{FileIdentity, open_regular};
-use crate::hashing::{Digests, MultiHasher, hash_file, hash_reader};
+use crate::hashing::{Digests, MultiHasher, hash_reader};
+use crate::importer::{self, strip_hash_store};
 use crate::incoming;
 use crate::mirrors::{
     self, MirrorKind, archive_org_urls, clean_label, github_release_url, status as mirror_status,
@@ -39,8 +37,9 @@ use crate::mirrors::{
 use crate::net::ClientInfo;
 use crate::settings::{self, SiteSettings};
 use crate::state::AppState;
-use crate::storage::{StorageBackend, new_key};
-use crate::util::{human_size, is_valid_slug, sanitize_filename, slugify};
+use crate::storage::new_key;
+use crate::tree::{self, TreeRow};
+use crate::util::{human_size, is_valid_slug, release_path, sanitize_filename, slugify};
 use crate::views::{Layout, render};
 
 /// Longest description / release notes (forms are capped at 64 KiB).
@@ -54,6 +53,9 @@ pub fn routes(config: &Config) -> Router<AppState> {
         .route("/admin", get(dashboard))
         .route("/admin/integrity", post(integrity_start))
         .route("/admin/releases/{id}/import", post(import_file))
+        .route("/admin/releases/{id}/import-all", post(import_all))
+        .route("/admin/imports/{id}", get(import_page))
+        .route("/admin/log", get(audit_page))
         .route("/admin/releases/{id}/signature", post(release_signature))
         .route("/admin/files/{id}/mirror", post(file_set_mirror))
         .route(
@@ -104,6 +106,10 @@ fn workspace_routes(prefix: &str, config: &Config) -> Router<AppState> {
         )
         .route(&format!("{prefix}/files/{{id}}/delete"), post(file_delete))
         .route(
+            &format!("{prefix}/files/{{id}}/recommend"),
+            post(file_recommend),
+        )
+        .route(
             &format!("{prefix}/files/{{id}}/download"),
             get(file_download),
         )
@@ -113,15 +119,52 @@ fn workspace_routes(prefix: &str, config: &Config) -> Router<AppState> {
 struct DeleteForm {
     csrf: String,
     confirm: Option<String>,
+    /// Typed confirmation, required for published items.
+    #[serde(default)]
+    typed: String,
 }
 
-fn require_confirm(f: &DeleteForm) -> Result<(), AppError> {
-    if f.confirm.is_none() {
+/// Unpublished items: the confirmation box. Published ones (anything the
+/// public can download): the exact `expected` text must be typed.
+fn require_confirm(f: &DeleteForm, published: bool, expected: &str) -> Result<(), AppError> {
+    if published {
+        if f.typed.trim() != expected {
+            return Err(AppError::BadRequest(format!(
+                "This is published. To delete it, type {expected} exactly. \
+                 (To hide it but keep its files, unpublish it instead.)"
+            )));
+        }
+    } else if f.confirm.is_none() {
         return Err(AppError::BadRequest(
             "Tick the confirmation box to delete.".into(),
         ));
     }
     Ok(())
+}
+
+/// Records a consequential action (deletions, publishing) in the audit log
+/// (/admin/log) and the server log. A failed write is logged, not fatal.
+pub(crate) async fn audit(
+    st: &AppState,
+    actor: &Actor,
+    action: &str,
+    target: &str,
+    detail: Option<&str>,
+) {
+    tracing::info!(user = %actor.username, action, target, "audit");
+    // Publishing changes and deletions change what may be on R2.
+    crate::r2::wake(st);
+    if let Err(e) = queries::audit(
+        &st.db,
+        Some((actor.id, &actor.username)),
+        action,
+        target,
+        detail,
+    )
+    .await
+    {
+        tracing::error!(error = %e, "could not write the audit log");
+    }
 }
 
 /// Deletes stored objects after their rows are gone. Failures only leave
@@ -365,6 +408,23 @@ struct ProjectEditTemplate {
     review_note: String,
     /// The edit sends a published project back for review (member, review on).
     resubmits: bool,
+    /// Text to type to delete (the slug) while something is published.
+    typed_confirm: String,
+}
+
+/// The slug, when the project is published with a published release
+/// (deleting it then needs the slug typed); "" otherwise.
+async fn project_typed_confirm(st: &AppState, p: &Project) -> Result<String, AppError> {
+    let published = p.review_status == review::APPROVED
+        && queries::list_releases(&st.db, p.id)
+            .await?
+            .iter()
+            .any(|r| r.review_status == review::APPROVED);
+    Ok(if published {
+        p.slug.clone()
+    } else {
+        String::new()
+    })
 }
 
 async fn project_edit_page(
@@ -373,7 +433,9 @@ async fn project_edit_page(
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     let p = load_project(&st, &actor, id).await?;
+    let typed_confirm = project_typed_confirm(&st, &p).await?;
     render(&ProjectEditTemplate {
+        typed_confirm,
         l: st.layout(format!("Edit {}", p.name), Some(&actor)),
         id,
         form: ProjectForm {
@@ -409,7 +471,9 @@ async fn project_update(
             Err(e) => return Err(e.into()),
         },
     };
+    let typed_confirm = project_typed_confirm(&st, &p).await?;
     let page = render(&ProjectEditTemplate {
+        typed_confirm,
         l: st.layout("Edit project", Some(&actor)),
         id,
         form: f,
@@ -428,10 +492,20 @@ async fn project_delete(
     Form(f): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
     actor.verify_csrf(&f.csrf)?;
-    require_confirm(&f)?;
-    load_project(&st, &actor, id).await?;
+    let p = load_project(&st, &actor, id).await?;
+    let releases = queries::list_releases(&st.db, id).await?;
+    let published = p.review_status == review::APPROVED
+        && releases.iter().any(|r| r.review_status == review::APPROVED);
+    require_confirm(&f, published, &p.slug)?;
     let objects = queries::objects_for_project(&st.db, id).await?;
     queries::delete_project(&st.db, id).await?; // cascades to releases and files
+    let detail = format!(
+        "{} releases, {} files{}",
+        releases.len(),
+        objects.len(),
+        if published { ", was published" } else { "" }
+    );
+    audit(&st, &actor, "delete-project", &p.slug, Some(&detail)).await;
     delete_objects(&st, objects).await;
     Ok(Redirect::to(&format!("{}/projects", actor.base())).into_response())
 }
@@ -459,6 +533,13 @@ impl ReleaseForm {
         let version = self.version.trim().to_string();
         if version.is_empty() || version.chars().count() > 64 {
             return Err("Version is required (at most 64 characters).".into());
+        }
+        // /p/<project>/latest is the newest release.
+        if version.eq_ignore_ascii_case("latest") {
+            return Err(
+                "\"latest\" is reserved (/p/<project>/latest always means the newest release)."
+                    .into(),
+            );
         }
         if self.notes_md.len() > MAX_TEXT_BYTES {
             return Err("Release notes are too long.".into());
@@ -602,6 +683,16 @@ struct ReleaseEditTemplate {
     error: Option<String>,
     /// The edit sends a published release back for review.
     resubmits: bool,
+    /// Text to type to delete (the version) while published.
+    typed_confirm: String,
+}
+
+fn release_typed_confirm(project: &Project, r: &Release) -> String {
+    if project.review_status == review::APPROVED && r.review_status == review::APPROVED {
+        r.version.clone()
+    } else {
+        String::new()
+    }
 }
 
 async fn release_edit_page(
@@ -611,6 +702,7 @@ async fn release_edit_page(
 ) -> Result<Response, AppError> {
     let (project, r) = load_release(&st, &actor, id).await?;
     render(&ReleaseEditTemplate {
+        typed_confirm: release_typed_confirm(&project, &r),
         l: st.layout(format!("Edit {} {}", project.name, r.version), Some(&actor)),
         project,
         id,
@@ -631,7 +723,7 @@ async fn release_update(
     Form(f): Form<ReleaseForm>,
 ) -> Result<Response, AppError> {
     actor.verify_csrf(&f.csrf)?;
-    let (project, _) = load_release(&st, &actor, id).await?;
+    let (project, old) = load_release(&st, &actor, id).await?;
     let review = member_review(&st, &actor);
     let error = match f.validate() {
         Err(e) => e,
@@ -658,6 +750,7 @@ async fn release_update(
         },
     };
     let page = render(&ReleaseEditTemplate {
+        typed_confirm: release_typed_confirm(&project, &old),
         l: st.layout("Edit release", Some(&actor)),
         project,
         id,
@@ -675,10 +768,19 @@ async fn release_delete(
     Form(f): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
     actor.verify_csrf(&f.csrf)?;
-    require_confirm(&f)?;
-    let (project, _) = load_release(&st, &actor, id).await?;
+    let (project, release) = load_release(&st, &actor, id).await?;
+    let published =
+        project.review_status == review::APPROVED && release.review_status == review::APPROVED;
+    require_confirm(&f, published, &release.version)?;
     let objects = queries::objects_for_release(&st.db, id).await?;
     queries::delete_release(&st.db, id).await?; // cascades to files
+    let detail = format!(
+        "{} files{}",
+        objects.len(),
+        if published { ", was published" } else { "" }
+    );
+    let target = format!("{}/{}", project.slug, release.version);
+    audit(&st, &actor, "delete-release", &target, Some(&detail)).await;
     delete_objects(&st, objects).await;
     Ok(Redirect::to(&format!(
         "{}/projects/{}/releases",
@@ -692,7 +794,7 @@ async fn release_delete(
 
 struct AdminFileView {
     id: i64,
-    filename: String,
+    path: String,
     status: String,
     error_message: String,
     size: String,
@@ -708,6 +810,8 @@ struct AdminFileView {
     /// "Recompute hashes" is offered for ready files and for failed files
     /// that were stored once.
     can_rehash: bool,
+    /// The release's recommended file (/p/<project>/latest/download).
+    recommended: bool,
 }
 
 struct CandidateView {
@@ -716,6 +820,42 @@ struct CandidateView {
     modified: String,
     settled: bool,
     in_flight: bool,
+}
+
+/// Import candidates under one top-level folder of the incoming folder
+/// ("" = files directly inside it).
+struct CandidateGroup {
+    folder: String,
+    files: Vec<CandidateView>,
+    /// Settled files not being imported, and their total size.
+    ready: usize,
+    size: String,
+}
+
+struct BatchView {
+    id: i64,
+    created: String,
+    folder: String,
+    total: i64,
+    done: i64,
+    skipped: i64,
+    failed: i64,
+    running: bool,
+}
+
+impl From<ImportBatch> for BatchView {
+    fn from(b: ImportBatch) -> Self {
+        BatchView {
+            id: b.id,
+            created: b.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+            running: b.finished_at.is_none(),
+            folder: b.folder,
+            total: b.total,
+            done: b.done,
+            skipped: b.skipped,
+            failed: b.failed,
+        }
+    }
 }
 
 #[derive(Template)]
@@ -728,8 +868,11 @@ struct FilesTemplate {
     published: bool,
     /// Members: limits, usage and the review notice.
     usage: Option<MemberUsage>,
-    files: Vec<AdminFileView>,
-    candidates: Vec<CandidateView>,
+    tree: Vec<TreeRow<AdminFileView>>,
+    file_count: usize,
+    groups: Vec<CandidateGroup>,
+    candidate_count: usize,
+    batches: Vec<BatchView>,
     incoming_path: String,
     incoming_error: Option<String>,
     min_age_secs: u64,
@@ -743,6 +886,8 @@ struct FilesTemplate {
     signature_status: &'static str,
     /// Public SHA256SUMS URL of this release (for the signing commands).
     sums_url: String,
+    /// Public release page.
+    release_url: String,
     flash: Option<&'static str>,
     error: Option<String>,
 }
@@ -762,17 +907,22 @@ fn flash_text(code: Option<&str>) -> Option<&'static str> {
         "mirror-saved" => "Mirror URL saved.",
         "signature-saved" => "Signature saved; SHA256SUMS.asc is now served for this release.",
         "signature-removed" => "Signature removed.",
+        "recommended" => "Recommended file set: /latest/download now serves it.",
+        "unrecommended" => "This release has no recommended file now.",
         _ => return None,
     })
 }
 
-/// `download_url` is the public link once published, otherwise the
-/// workspace link (`base`/files/{id}/download) only the owner and admins can use.
+/// `download_url` is the stable public URL once published, otherwise the
+/// workspace link (`base`/files/{id}/download) only the owner and admins
+/// can use.
 fn file_view(
     st: &AppState,
     f: FileRow,
     all_mirrors: &[Mirror],
-    base: Option<&str>,
+    public: Option<(&str, &str)>,
+    base: &str,
+    recommended: Option<i64>,
 ) -> AdminFileView {
     AdminFileView {
         mirrors: all_mirrors
@@ -781,14 +931,15 @@ fn file_view(
             .map(|m| format!("{} ({}, {})", m.label, m.kind, m.status))
             .collect(),
         storage_key: f.storage_key.clone(),
-        download_url: match base {
-            None => st.download_url(f.id),
-            Some(base) => format!("{base}/files/{}/download", f.id),
+        download_url: match public {
+            Some((slug, version)) => st.release_file_url(slug, version, &f.path),
+            None => format!("{base}/files/{}/download", f.id),
         },
         can_rehash: f.status == status::READY
             || (f.status == status::FAILED && !f.sha256.is_empty()),
+        recommended: recommended == Some(f.id),
         id: f.id,
-        filename: f.filename,
+        path: f.path,
         status: f.status,
         error_message: f.error_message.unwrap_or_default(),
         size: human_size(f.size_bytes as u64),
@@ -805,6 +956,46 @@ fn storage_note(st: &AppState) -> &'static str {
     } else {
         "Files are stored byte-for-byte as uploaded or imported (no metadata stripper is active)."
     }
+}
+
+/// Groups scanned candidates by their top-level folder.
+fn candidate_groups(st: &AppState, list: Vec<incoming::Candidate>) -> Vec<CandidateGroup> {
+    let in_flight = st.imports_in_flight.lock().unwrap().clone();
+    let canon_root = st.config.incoming_path.canonicalize().ok();
+    let mut groups: std::collections::BTreeMap<String, (Vec<CandidateView>, usize, u64)> =
+        std::collections::BTreeMap::new();
+    for c in list {
+        let folder = match c.rel_path.split_once('/') {
+            Some((top, _)) => top.to_string(),
+            None => String::new(),
+        };
+        let in_flight = canon_root
+            .as_ref()
+            .is_some_and(|r| in_flight.contains(&r.join(&c.rel_path)));
+        let entry = groups.entry(folder).or_default();
+        if c.settled && !in_flight {
+            entry.1 += 1;
+            entry.2 += c.size;
+        }
+        entry.0.push(CandidateView {
+            in_flight,
+            size: human_size(c.size),
+            modified: chrono::DateTime::<Utc>::from(c.modified)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string(),
+            settled: c.settled,
+            rel_path: c.rel_path,
+        });
+    }
+    groups
+        .into_iter()
+        .map(|(folder, (files, ready, bytes))| CandidateGroup {
+            folder,
+            files,
+            ready,
+            size: human_size(bytes),
+        })
+        .collect()
 }
 
 async fn render_files(
@@ -827,17 +1018,31 @@ async fn render_files(
         (true, true) => "current",
         (true, false) => "outdated",
     };
-    let sums_url = format!(
-        "{}/p/{}/{}/SHA256SUMS",
-        st.config.public_url.as_deref().unwrap_or(""),
-        project.slug,
-        crate::util::encode_path_segment(&release.version)
-    );
-    let link_base = (!published).then(|| actor.base());
-    let files: Vec<_> = raw_files
+    let public_base = st.config.public_url.as_deref().unwrap_or("");
+    let version_seg = crate::util::encode_path_segment(&release.version);
+    let sums_url = format!("{public_base}/p/{}/{version_seg}/SHA256SUMS", project.slug);
+    let release_url = format!("/p/{}/{version_seg}", project.slug);
+    let public = published.then_some((project.slug.as_str(), release.version.as_str()));
+    let mut views: Vec<AdminFileView> = raw_files
         .into_iter()
-        .map(|f| file_view(st, f, &all_mirrors, link_base))
+        .map(|f| {
+            file_view(
+                st,
+                f,
+                &all_mirrors,
+                public,
+                actor.base(),
+                release.recommended_file_id,
+            )
+        })
         .collect();
+    // The recommended file first, then by path.
+    views.sort_by_key(|v| !v.recommended);
+    let busy = views
+        .iter()
+        .any(|f| f.status == status::IMPORTING || f.status == status::HASHING);
+    let file_count = views.len();
+    let tree = tree::build(views.into_iter().map(|v| (v.path.clone(), 0, v)).collect());
     let usage = member_usage(st, actor).await?;
 
     // Scanning touches the disk; keep it off the async workers. Members
@@ -851,40 +1056,29 @@ async fn render_files(
     } else {
         Ok(Vec::new())
     };
-    let (candidates, incoming_error) = match scan {
-        Ok(list) => {
-            let in_flight = st.imports_in_flight.lock().unwrap().clone();
-            let canon_root = st.config.incoming_path.canonicalize().ok();
-            let views = list
-                .into_iter()
-                .map(|c| CandidateView {
-                    in_flight: canon_root
-                        .as_ref()
-                        .is_some_and(|r| in_flight.contains(&r.join(&c.rel_path))),
-                    size: human_size(c.size),
-                    modified: chrono::DateTime::<Utc>::from(c.modified)
-                        .format("%Y-%m-%d %H:%M UTC")
-                        .to_string(),
-                    settled: c.settled,
-                    rel_path: c.rel_path,
-                })
-                .collect();
-            (views, None)
-        }
+    let (groups, incoming_error) = match scan {
+        Ok(list) => (candidate_groups(st, list), None),
         Err(e) => (
             Vec::new(),
             Some(format!("Cannot read the incoming folder: {e}")),
         ),
+    };
+    let candidate_count = groups.iter().map(|g| g.files.len()).sum();
+    let batches: Vec<BatchView> = if actor.is_admin {
+        queries::recent_batches(&st.db, release_id, 3)
+            .await?
+            .into_iter()
+            .map(BatchView::from)
+            .collect()
+    } else {
+        Vec::new()
     };
 
     let mut l = st.layout(
         format!("Files of {} {}", project.name, release.version),
         Some(actor),
     );
-    if files
-        .iter()
-        .any(|f| f.status == status::IMPORTING || f.status == status::HASHING)
-    {
+    if busy || batches.iter().any(|b| b.running) {
         l.refresh = Some(5);
     }
     let status = if error.is_some() {
@@ -902,8 +1096,11 @@ async fn render_files(
         release,
         published,
         usage,
-        files,
-        candidates,
+        tree,
+        file_count,
+        groups,
+        candidate_count,
+        batches,
         incoming_path: st.config.incoming_path.display().to_string(),
         incoming_error,
         min_age_secs: st.config.import_min_age_secs,
@@ -913,6 +1110,7 @@ async fn render_files(
         sign_checksums: st.config.sign_checksums,
         signature_status,
         sums_url,
+        release_url,
         flash,
         error,
     })?;
@@ -953,80 +1151,34 @@ async fn file_download(
     crate::routes::public::serve_file(&st, f, client, method, &headers, false).await
 }
 
-// ---- files: the store pipeline ------------------------------------------------
-
-/// strip (only if STRIP_METADATA and a stripper supports the file) ->
-/// hash + size (SHA-256 and SHA-512 in one pass) -> move into storage.
-///
-/// `src` is a local file (an incoming file, or a spooled upload); stripped
-/// copies are written to `work_dir`. Returns the digests of the bytes that
-/// were stored. Without a stripper the file is stored byte-for-byte.
-///
-/// `validated` pins the file checked when the import was requested: the
-/// file hashed must be that same, unmodified inode, and storage only moves
-/// the inode that was hashed (no swap between check, hash and move).
-#[allow(clippy::too_many_arguments)]
-async fn strip_hash_store(
-    st: &AppState,
-    backend: &Arc<dyn StorageBackend>,
-    key: &str,
-    src: &FsPath,
-    validated: Option<FileIdentity>,
-    filename: &str,
-    mime: Option<&str>,
-    work_dir: &FsPath,
-) -> Result<Digests, String> {
-    let registry = st.strippers.clone();
-    let enabled = st.config.strip_metadata;
-    let (src_c, name_c, mime_c, work_c) = (
-        src.to_path_buf(),
-        filename.to_string(),
-        mime.map(str::to_string),
-        work_dir.to_path_buf(),
-    );
-    let stripped = tokio::task::spawn_blocking(move || {
-        registry.maybe_strip(enabled, &name_c, mime_c.as_deref(), &src_c, &work_c)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-    let to_store = stripped.clone().unwrap_or_else(|| src.to_path_buf());
-
-    let result = async {
-        let hash_path = to_store.clone();
-        let (digests, hashed) = tokio::task::spawn_blocking(move || hash_file(&hash_path))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| format!("reading the file failed: {e}"))?;
-        if let Some(v) = validated
-            && stripped.is_none()
-            && !hashed.unchanged(&v)
-        {
-            return Err("the file was replaced or modified after the import was requested".into());
-        }
-        let stored = backend
-            .import_from_path(key, &to_store, hashed)
-            .await
-            .map_err(|e| format!("moving into storage failed: {e}"))?;
-        if stored != digests.size {
-            let _ = backend.delete(key).await;
-            return Err(
-                "the file changed while it was being imported; copy it again and retry".into(),
-            );
-        }
-        Ok(digests)
+/// Marks a ready file as the release's recommended download, or clears the
+/// mark when it already is.
+async fn file_recommend(
+    actor: Actor,
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Form(f): Form<CsrfOnlyForm>,
+) -> Result<Response, AppError> {
+    actor.verify_csrf(&f.csrf)?;
+    let file = load_file(&st, &actor, id).await?;
+    let (_, release) = load_release(&st, &actor, file.release_id).await?;
+    if file.status != status::READY {
+        return render_files(
+            &st,
+            &actor,
+            file.release_id,
+            None,
+            Some("Only ready files can be recommended.".into()),
+        )
+        .await;
     }
-    .await;
-
-    if let Some(stripped) = stripped {
-        // Left over only on failure (on success it was moved into storage).
-        let _ = tokio::fs::remove_file(&stripped).await;
-        if result.is_ok() {
-            // The stripped copy replaced the original.
-            let _ = tokio::fs::remove_file(src).await;
-        }
-    }
-    result
+    let (value, msg) = if release.recommended_file_id == Some(id) {
+        (None, "unrecommended")
+    } else {
+        (Some(id), "recommended")
+    };
+    queries::set_recommended(&st.db, release.id, value).await?;
+    Ok(files_redirect(&actor, release.id, msg))
 }
 
 // ---- files: import from INCOMING_PATH -----------------------------------------
@@ -1037,23 +1189,16 @@ struct ImportForm {
     path: String,
 }
 
-/// Removes an in-flight marker when the import task ends (even on panic).
-struct InFlightGuard {
-    set: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
-    path: PathBuf,
+#[derive(Deserialize)]
+struct ImportAllForm {
+    csrf: String,
+    /// Incoming subfolder ("" = everything).
+    #[serde(default)]
+    folder: String,
 }
 
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        if let Ok(mut set) = self.set.lock() {
-            set.remove(&self.path);
-        }
-    }
-}
-
-/// Validates the request, records an 'importing' row and hands the actual
-/// work to a background task, so the request returns immediately regardless
-/// of file size (proxies time out long requests).
+/// Imports one file (a batch of one). Returns at once; the file is
+/// processed in the background (proxies time out long requests).
 async fn import_file(
     admin: AdminUser,
     State(st): State<AppState>,
@@ -1062,132 +1207,94 @@ async fn import_file(
 ) -> Result<Response, AppError> {
     admin.verify_csrf(&f.csrf)?;
     load_release(&st, &admin, release_id).await?;
-
-    let root = st.config.incoming_path.clone();
-    let min_age = Duration::from_secs(st.config.import_min_age_secs);
-    let rel = f.path.clone();
-    let resolved = tokio::task::spawn_blocking(move || {
-        incoming::resolve(&root, &rel, min_age, SystemTime::now())
-    })
-    .await
-    .map_err(AppError::internal)?;
-    let src = match resolved {
-        Ok(p) => p,
-        Err(e) => return render_files(&st, &admin, release_id, None, Some(e.to_string())).await,
-    };
-    // Open it now (no symlinks, no FIFOs, no hard links) and pin its identity;
-    // the background job only proceeds with this exact, unmodified inode.
-    let open_path = src.clone();
-    let identity = match tokio::task::spawn_blocking(move || open_regular(&open_path))
-        .await
-        .map_err(AppError::internal)?
-    {
-        Ok((_, id)) => id,
-        Err(e) => {
-            return render_files(
-                &st,
-                &admin,
-                release_id,
-                None,
-                Some(format!("Cannot import this file: {e}")),
-            )
-            .await;
+    let selection = importer::Selection::File(f.path);
+    match importer::queue(&st, release_id, Some(admin.id), "web", selection).await {
+        Err(msg) => render_files(&st, &admin, release_id, None, Some(msg)).await,
+        Ok(batch) if batch.is_empty() => {
+            let msg = batch
+                .refused
+                .first()
+                .map(|(path, why)| format!("Cannot import {path}: {why}"))
+                .unwrap_or_else(|| "Nothing to import.".into());
+            render_files(&st, &admin, release_id, None, Some(msg)).await
         }
-    };
-    // Refuse up front when storage would run (nearly) full.
-    let size = identity.len;
-    if let Err(msg) = crate::limits::check_free_space(
-        &st.config.storage_path,
-        size,
-        st.config.security.storage_min_free_bytes,
-    ) {
-        return render_files(&st, &admin, release_id, None, Some(msg)).await;
+        Ok(batch) => {
+            tokio::spawn(importer::run(st.clone(), batch, |_| {}));
+            Ok(files_redirect(&admin, release_id, "import-started"))
+        }
     }
-
-    if !st.imports_in_flight.lock().unwrap().insert(src.clone()) {
-        let msg = "That file is already being imported.".to_string();
-        return render_files(&st, &admin, release_id, None, Some(msg)).await;
-    }
-    let guard = InFlightGuard {
-        set: st.imports_in_flight.clone(),
-        path: src.clone(),
-    };
-
-    let backend = st.storage.active();
-    let key = new_key();
-    let filename = sanitize_filename(&f.path);
-    let id = queries::insert_file(
-        &st.db,
-        &NewFile {
-            release_id,
-            filename: &filename,
-            size_bytes: 0,
-            sha256: "",
-            sha512: None,
-            storage_backend: backend.name(),
-            storage_key: &key,
-            status: status::IMPORTING,
-        },
-    )
-    .await?;
-    tracing::info!(file_id = id, path = %f.path, "import started");
-
-    tokio::spawn(async move {
-        let _guard = guard;
-        run_import(st, id, src, identity, key, filename, backend).await;
-    });
-    Ok(files_redirect(&admin, release_id, "import-started"))
 }
 
-/// The background half of an import: strip/hash/store, then mark ready (or
-/// failed with a short message).
-async fn run_import(
-    st: AppState,
-    id: i64,
-    src: PathBuf,
-    identity: FileIdentity,
-    key: String,
-    filename: String,
-    backend: Arc<dyn StorageBackend>,
-) {
-    // Queue behind IMPORT_CONCURRENCY other hashing jobs (status stays
-    // 'importing' while waiting).
-    let _slot = st.job_slots.clone().acquire_owned().await;
-    // Stripped copies (if any) go next to the source: same filesystem, and
-    // hidden from the incoming scan by the leading dot.
-    let work_dir = src.parent().map(FsPath::to_path_buf).unwrap_or_default();
-    let result = strip_hash_store(
-        &st,
-        &backend,
-        &key,
-        &src,
-        Some(identity),
-        &filename,
-        None,
-        &work_dir,
-    )
-    .await;
-    match result {
-        Ok(d) => {
-            match queries::finish_import(&st.db, id, d.size as i64, &d.sha256, &d.sha512).await {
-                Ok(true) => tracing::info!(file_id = id, size = d.size, "import finished"),
-                Ok(false) => {
-                    // The row was deleted meanwhile; drop the now-orphaned object.
-                    tracing::warn!(file_id = id, "file row vanished during import");
-                    let _ = backend.delete(&key).await;
-                }
-                Err(e) => {
-                    tracing::error!(file_id = id, error = %e, "could not mark import finished")
-                }
-            }
-        }
-        Err(msg) => {
-            tracing::warn!(file_id = id, error = %msg, "import failed");
-            if let Err(e) = queries::mark_failed(&st.db, id, &msg).await {
-                tracing::error!(file_id = id, error = %e, "could not mark import failed");
-            }
+/// "Import all": every settled file of the incoming folder or of one
+/// subfolder, as one batch; shows the batch's progress page.
+async fn import_all(
+    admin: AdminUser,
+    State(st): State<AppState>,
+    Path(release_id): Path<i64>,
+    Form(f): Form<ImportAllForm>,
+) -> Result<Response, AppError> {
+    admin.verify_csrf(&f.csrf)?;
+    load_release(&st, &admin, release_id).await?;
+    let selection = importer::Selection::Folder(f.folder);
+    match importer::queue(&st, release_id, Some(admin.id), "web", selection).await {
+        Err(msg) => render_files(&st, &admin, release_id, None, Some(msg)).await,
+        Ok(batch) => {
+            let id = batch.batch_id;
+            tokio::spawn(importer::run(st.clone(), batch, |_| {}));
+            Ok(Redirect::to(&format!("/admin/imports/{id}")).into_response())
         }
     }
+}
+
+struct ItemView {
+    path: String,
+    size: String,
+    status: String,
+    message: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin/import.html")]
+struct ImportTemplate {
+    l: Layout,
+    project: Project,
+    release: Release,
+    batch: BatchView,
+    items: Vec<ItemView>,
+}
+
+/// A batch's progress, per-file results and failures.
+async fn import_page(
+    admin: AdminUser,
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let batch = queries::get_batch(&st.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let (project, release) = load_release(&st, &admin, batch.release_id).await?;
+    let items = queries::batch_items(&st.db, id)
+        .await?
+        .into_iter()
+        .map(|i| ItemView {
+            path: i.path,
+            size: human_size(i.size_bytes as u64),
+            status: i.status,
+            message: i.message.unwrap_or_default(),
+        })
+        .collect();
+    let batch = BatchView::from(batch);
+    let mut l = st.layout(format!("Import #{id}"), Some(&admin));
+    if batch.running {
+        l.refresh = Some(5);
+    }
+    render(&ImportTemplate {
+        l,
+        project,
+        release,
+        batch,
+        items,
+    })
 }
 
 // ---- files: recompute hashes ---------------------------------------------------
@@ -1444,6 +1551,21 @@ async fn upload_files(
                     continue; // no file chosen
                 };
                 let filename = sanitize_filename(&raw_name);
+                // Uploads land at the top of the release; never overwrite.
+                if let Err(e) = release_path(&filename, 1) {
+                    return Err(AppError::BadRequest(format!(
+                        "Cannot upload {filename}: {e}."
+                    )));
+                }
+                if queries::file_at_path(&st.db, release_id, &filename)
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::BadRequest(format!(
+                        "{filename} already exists in this release. Files are never overwritten: \
+                         delete it first to replace it."
+                    )));
+                }
                 let mime = field.content_type().map(str::to_string);
                 let backend = st.storage.active();
                 let key = new_key();
@@ -1507,6 +1629,7 @@ async fn upload_files(
                     &NewFile {
                         release_id,
                         filename: &filename,
+                        path: &filename,
                         size_bytes: digests.size as i64,
                         sha256: &digests.sha256,
                         sha512: Some(&digests.sha512),
@@ -1518,6 +1641,11 @@ async fn upload_files(
                 .await;
                 if let Err(e) = inserted {
                     let _ = backend.delete(&key).await;
+                    if is_unique_violation(&e) {
+                        return Err(AppError::BadRequest(format!(
+                            "{filename} already exists in this release. Files are never overwritten."
+                        )));
+                    }
                     return Err(e.into());
                 }
                 if let Some(c) = caps.as_mut() {
@@ -2026,8 +2154,17 @@ async fn file_delete(
     Form(f): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
     actor.verify_csrf(&f.csrf)?;
-    require_confirm(&f)?;
     let file = load_file(&st, &actor, id).await?;
+    let (project, release) = load_release(&st, &actor, file.release_id).await?;
+    let published = file.status == status::READY
+        && project.review_status == review::APPROVED
+        && release.review_status == review::APPROVED;
+    if let Err(e) = require_confirm(&f, published, &file.path) {
+        let AppError::BadRequest(msg) = e else {
+            return Err(e);
+        };
+        return render_files(&st, &actor, file.release_id, None, Some(msg)).await;
+    }
     if file.status == status::IMPORTING {
         return render_files(
             &st,
@@ -2039,8 +2176,33 @@ async fn file_delete(
         .await;
     }
     queries::delete_file(&st.db, id).await?;
+    let target = format!("{}/{}/{}", project.slug, release.version, file.path);
+    let detail = format!(
+        "{}, SHA-256 {}{}",
+        human_size(file.size_bytes as u64),
+        file.sha256,
+        if published { ", was published" } else { "" }
+    );
+    audit(&st, &actor, "delete-file", &target, Some(&detail)).await;
     delete_objects(&st, vec![(file.storage_backend, file.storage_key)]).await;
     Ok(files_redirect(&actor, file.release_id, "deleted"))
+}
+
+// ---- audit log ---------------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "admin/log.html")]
+struct AuditTemplate {
+    l: Layout,
+    entries: Vec<crate::db::models::AuditEntry>,
+}
+
+/// The last 500 deletions and publishing changes.
+async fn audit_page(admin: AdminUser, State(st): State<AppState>) -> Result<Response, AppError> {
+    render(&AuditTemplate {
+        l: st.layout("Log", Some(&admin)),
+        entries: queries::recent_audit(&st.db, 500).await?,
+    })
 }
 
 // ---- settings --------------------------------------------------------------

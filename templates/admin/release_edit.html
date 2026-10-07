@@ -16,6 +16,7 @@
   <h2>Delete release</h2>
   {% let delete_action = format!("{}/releases/{}/delete", base, self.id) %}
   {% let delete_label = "Yes, delete this release and all its files" %}
+  {% let delete_typed = typed_confirm.as_str() %}
   {% include "admin/_delete.html" %}
 </section>
 {% endblock %}

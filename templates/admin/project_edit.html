@@ -25,6 +25,7 @@
   <h2>Delete project</h2>
   {% let delete_action = format!("{}/projects/{}/delete", base, self.id) %}
   {% let delete_label = "Yes, delete this project with all its releases and files" %}
+  {% let delete_typed = typed_confirm.as_str() %}
   {% include "admin/_delete.html" %}
 </section>
 {% endblock %}

@@ -5,6 +5,7 @@ A complete backup has three parts:
 1. **Database** (projects, releases, file records, settings, the admin
    account): `scripts/backup.sh`.
 2. **Configuration** (`.env` with all secrets incl. `TOTP_ENCRYPTION_KEY`,
+   which also unlocks the R2 secret stored in the database,
    `Caddyfile`, compose override files): also `scripts/backup.sh`.
 3. **File storage** (`STORAGE_HOST_PATH`, the actual ISOs): large, so backed
    up separately with your usual tools.

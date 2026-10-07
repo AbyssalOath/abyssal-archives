@@ -12,12 +12,14 @@ pub mod error;
 pub mod fsid;
 pub mod guard;
 pub mod hashing;
+pub mod importer;
 pub mod incoming;
 pub mod integrity;
 pub mod limits;
 pub mod markdown;
 pub mod mirrors;
 pub mod net;
+pub mod r2;
 pub mod range;
 pub mod ratelimit;
 pub mod routes;
@@ -28,6 +30,7 @@ pub mod state;
 pub mod storage;
 pub mod torrent;
 pub mod totp;
+pub mod tree;
 pub mod util;
 pub mod views;
 
@@ -60,6 +63,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     tracing::info!(?config, "starting");
     let state = AppState::init(config).await?;
+    // Optional R2 download origin; idle until configured in /admin/storage.
+    r2::spawn_worker(state.clone());
     let sec = state.config.security.clone();
     // LISTEN_ADDR is only for running outside Docker (e.g. when 8080 is
     // taken on a dev machine); the container always uses 0.0.0.0:8080.

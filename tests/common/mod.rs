@@ -179,13 +179,52 @@ pub async fn reset_db(url: &str) {
         .expect("connect TEST_DATABASE_URL");
     sqlx::raw_sql(
         "SET FOREIGN_KEY_CHECKS = 0; \
-         DROP TABLE IF EXISTS limit_requests, user_recovery_codes, file_mirrors, files, releases, projects, sessions, users, site_settings, _sqlx_migrations; \
+         DROP TABLE IF EXISTS r2_objects, audit_log, import_items, import_batches, limit_requests, user_recovery_codes, file_mirrors, files, releases, projects, sessions, users, site_settings, _sqlx_migrations; \
          SET FOREIGN_KEY_CHECKS = 1;",
     )
     .execute(&pool)
     .await
     .unwrap();
     pool.close().await;
+}
+
+/// The environment the test app runs with (also used to run the binary).
+pub fn test_env(dir: &std::path::Path, extra: &[(&str, String)]) -> HashMap<String, String> {
+    let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
+    let mut env: HashMap<String, String> = HashMap::from([
+        ("DATABASE_URL".to_string(), db_url),
+        ("SITE_NAME".to_string(), "Security Test".to_string()),
+        (
+            "STORAGE_PATH".to_string(),
+            dir.join("storage").display().to_string(),
+        ),
+        (
+            "INCOMING_PATH".to_string(),
+            dir.join("incoming").display().to_string(),
+        ),
+        ("IMPORT_MIN_AGE_SECS".to_string(), "0".to_string()),
+        ("STORAGE_MIN_FREE_BYTES".to_string(), "0".to_string()),
+    ]);
+    for (k, v) in extra {
+        env.insert(k.to_string(), v.clone());
+    }
+    env
+}
+
+/// Regular files under `dir`, recursively.
+pub fn count_files(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| match e.file_type() {
+                    Ok(t) if t.is_dir() => count_files(&e.path()),
+                    Ok(t) if t.is_file() => 1,
+                    _ => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// Builds the app against TEST_DATABASE_URL (wiped first) with `env`
@@ -197,23 +236,7 @@ pub async fn test_app(
     reset_db(&db_url).await;
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("incoming")).unwrap();
-    let mut env: HashMap<String, String> = HashMap::from([
-        ("DATABASE_URL".to_string(), db_url),
-        ("SITE_NAME".to_string(), "Security Test".to_string()),
-        (
-            "STORAGE_PATH".to_string(),
-            dir.path().join("storage").display().to_string(),
-        ),
-        (
-            "INCOMING_PATH".to_string(),
-            dir.path().join("incoming").display().to_string(),
-        ),
-        ("IMPORT_MIN_AGE_SECS".to_string(), "0".to_string()),
-        ("STORAGE_MIN_FREE_BYTES".to_string(), "0".to_string()),
-    ]);
-    for (k, v) in extra {
-        env.insert(k.to_string(), v.clone());
-    }
+    let env = test_env(dir.path(), extra);
     let config = Config::from_lookup(|k| env.get(k).cloned()).unwrap();
     let state = AppState::init(config).await.unwrap();
     let db = state.db.clone();

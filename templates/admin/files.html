@@ -5,7 +5,7 @@
 <p class="crumbs"><a href="{{ base }}/projects">Projects</a> / <a href="{{ base }}/projects/{{ project.id }}/releases">{{ project.name }}</a> /</p>
 <h1>{{ project.name }} {{ release.version }}: files {% let rs = release.review_status.as_str() %}{% include "admin/_review_badge.html" %}</h1>
 <p class="actions">
-  {% if published %}<a class="btn" href="/p/{{ project.slug }}">View public page</a>{% endif %}
+  {% if published %}<a class="btn" href="{{ release_url }}">View release page</a>{% endif %}
   <a class="btn" href="{{ base }}/releases/{{ release.id }}/edit">Edit release</a>
   <a class="btn" href="{{ base }}/releases/{{ release.id }}/files">Refresh</a>
 </p>
@@ -17,25 +17,50 @@
 {% include "admin/_usage.html" %}
 {% if l.is_admin() %}
 <section class="card">
-  <h2>Review</h2>
-  <p class="muted">Download and check the files, then publish this release (or don't).</p>
+  <h2>Publishing</h2>
+  <p class="muted">{% if published %}Published. Unpublishing hides the release (and its downloads) but keeps every file.
+    {% else %}Download and check the files, then publish this release.{% endif %}</p>
   {% let review_action = format!("/admin/releases/{}/review", self.release.id) %}
   {% let review_back = "files" %}
   {% include "admin/_review_form.html" %}
 </section>
 {% endif %}
 
+{% if !batches.is_empty() %}
 <section class="card">
-  <h2>Files in this release</h2>
-  <p class="muted">{{ storage_note }}</p>
-  {% if files.is_empty() %}
-  <p class="muted">No files yet.{% if l.is_admin() %} Import one from the incoming folder below.{% endif %}</p>
+  <h2>Imports</h2>
+  <ul class="file-list">
+    {% for b in batches %}
+    <li class="file"><div class="file-info">
+      <span class="file-name"><a href="/admin/imports/{{ b.id }}">Import #{{ b.id }}</a>
+        {% if b.running %}<span class="status status-pending">running</span>{% else %}<span class="status status-approved">finished</span>{% endif %}</span>
+      <span class="file-meta">{{ b.created }} · {% if b.folder.is_empty() %}incoming folder{% else %}{{ b.folder }}/{% endif %} ·
+        {{ b.done + b.skipped + b.failed }} of {{ b.total }} done: {{ b.done }} imported, {{ b.skipped }} skipped,
+        {% if b.failed > 0 %}<strong>{{ b.failed }} failed</strong>{% else %}0 failed{% endif %}</span>
+    </div></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Files in this release ({{ file_count }})</h2>
+  <p class="muted">{{ storage_note }} Paths are kept: <code>sources/a.tar.gz</code> downloads as
+    <code>/p/{{ project.slug }}/&lt;version&gt;/sources/a.tar.gz</code> and is listed that way in SHA256SUMS.</p>
+  {% if tree.is_empty() %}
+  <p class="muted">No files yet.{% if l.is_admin() %} Import them from the incoming folder below.{% endif %}</p>
   {% else %}
   <ul class="file-list admin-files">
-    {% for f in files %}
+  {% for row in tree %}
+    {% if row.kind == "open" %}
+    <li class="folder"><details><summary><span class="folder-name">{{ row.path }}/</span> <span class="muted">{{ row.files }} files</span></summary>
+    <ul class="file-list">
+    {% else if row.kind == "close" %}
+    </ul></details></li>
+    {% else if let Some(f) = row.item %}
     <li class="file">
       <div class="file-info">
-        <span class="file-name">{{ f.filename }} <span class="status status-{{ f.status }}">{{ f.status }}</span></span>
+        <span class="file-name">{{ f.path }} <span class="status status-{{ f.status }}">{{ f.status }}</span>{% if f.recommended %} <span class="badge">Recommended</span>{% endif %}</span>
         {% if f.status == "ready" %}
         <span class="file-meta">{{ f.size }} · {{ f.downloads }} downloads · <a href="{{ f.download_url }}">{% if published %}download link{% else %}download (private){% endif %}</a></span>
         <span class="file-hash">SHA-256 <code class="hash">{{ f.sha256 }}</code></span>
@@ -45,7 +70,7 @@
         <span class="file-hash">Storage key <code>{{ f.storage_key }}</code></span>
         {% endif %}
         {% else if f.status == "importing" %}
-        <span class="file-meta">Hashing and moving into storage… this page refreshes every 5 seconds.</span>
+        <span class="file-meta">Queued or importing… this page refreshes every 5 seconds.</span>
         {% else if f.status == "hashing" %}
         <span class="file-meta">Recomputing hashes… this page refreshes every 5 seconds.</span>
         {% else %}
@@ -54,6 +79,12 @@
       </div>
       {% if f.status != "importing" && f.status != "hashing" %}
       <div class="file-admin-actions">
+        {% if f.status == "ready" %}
+        <form method="post" action="{{ base }}/files/{{ f.id }}/recommend" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-small">{% if f.recommended %}Unmark recommended{% else %}Mark recommended{% endif %}</button>
+        </form>
+        {% endif %}
         {% if l.is_admin() %}
         {% if f.status == "ready" %}
         <a class="btn btn-small" href="/admin/files/{{ f.id }}/mirrors">Mirrors ({{ f.mirrors.len() }})</a>
@@ -67,13 +98,18 @@
         {% endif %}
         <form method="post" action="{{ base }}/files/{{ f.id }}/delete" class="form form-inline">
           <input type="hidden" name="csrf" value="{{ csrf }}">
+          {% if published && f.status == "ready" %}
+          <input name="typed" required autocomplete="off" spellcheck="false" placeholder="type {{ f.path }} to delete" aria-label="Type {{ f.path }} to confirm deleting this published file">
+          {% else %}
           <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> confirm</label>
+          {% endif %}
           <button type="submit" class="btn btn-small btn-danger">Delete</button>
         </form>
       </div>
       {% endif %}
     </li>
-    {% endfor %}
+    {% endif %}
+  {% endfor %}
   </ul>
   {% endif %}
 </section>
@@ -81,39 +117,60 @@
 {% if l.is_admin() %}
 <section class="card">
   <h2>Import from the incoming folder</h2>
-  <p>Copy large files into <code>{{ incoming_path }}</code> (rsync, scp or SMB; see docs/IMPORT.md), then import them here.
-     Hidden files, partial transfers and files changed in the last {{ min_age_secs }} seconds are not offered.</p>
+  <p>Copy files into <code>{{ incoming_path }}</code> (rsync, scp or SMB; see docs/IMPORT.md), then import them here.
+     Folders are kept (up to 3 levels): <code>sources/a.tar.gz</code> becomes <code>sources/a.tar.gz</code> in the release.
+     Hidden files, partial transfers and files changed in the last {{ min_age_secs }} seconds are not offered.
+     Existing paths are never overwritten; files already imported with the same SHA-256 are skipped.</p>
   {% if let Some(e) = incoming_error %}
   <p class="alert alert-error" role="alert">{{ e }}</p>
-  {% else if candidates.is_empty() %}
+  {% else if candidate_count == 0 %}
   <p class="muted">The incoming folder is empty.</p>
   {% else %}
-  <div class="table-wrap">
-  <table>
-    <thead><tr><th scope="col">File</th><th scope="col">Size</th><th scope="col">Modified</th><th scope="col">Action</th></tr></thead>
-    <tbody>
-    {% for c in candidates %}
-    <tr>
-      <td><code>{{ c.rel_path }}</code></td>
-      <td>{{ c.size }}</td>
-      <td>{{ c.modified }}</td>
-      <td>
-        {% if c.in_flight %}<span class="muted">importing…</span>
-        {% else if !c.settled %}<span class="muted">still being copied</span>
-        {% else %}
-        <form method="post" action="/admin/releases/{{ release.id }}/import" class="inline">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="path" value="{{ c.rel_path }}">
-          <button type="submit" class="btn btn-small btn-primary">Import</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
+  <form method="post" action="/admin/releases/{{ release.id }}/import-all" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="folder" value="">
+    <button type="submit" class="btn btn-primary glow">Import all ({{ candidate_count }} files)</button>
+  </form>
+  {% for g in groups %}
+  <details class="folder"{% if g.folder.is_empty() %} open{% endif %}>
+    <summary><span class="folder-name">{% if g.folder.is_empty() %}(top level){% else %}{{ g.folder }}/{% endif %}</span>
+      <span class="muted">{{ g.files.len() }} files, {{ g.ready }} ready ({{ g.size }})</span></summary>
+    {% if !g.folder.is_empty() && g.ready > 0 %}
+    <form method="post" action="/admin/releases/{{ release.id }}/import-all" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="folder" value="{{ g.folder }}">
+      <button type="submit" class="btn btn-small btn-primary">Import all in {{ g.folder }}/ ({{ g.ready }})</button>
+    </form>
+    {% endif %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">File</th><th scope="col">Size</th><th scope="col">Modified</th><th scope="col">Action</th></tr></thead>
+      <tbody>
+      {% for c in g.files %}
+      <tr>
+        <td><code>{{ c.rel_path }}</code></td>
+        <td>{{ c.size }}</td>
+        <td>{{ c.modified }}</td>
+        <td>
+          {% if c.in_flight %}<span class="muted">importing…</span>
+          {% else if !c.settled %}<span class="muted">still being copied</span>
+          {% else %}
+          <form method="post" action="/admin/releases/{{ release.id }}/import" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="path" value="{{ c.rel_path }}">
+            <button type="submit" class="btn btn-small">Import</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+  {% endfor %}
   {% endif %}
+  <p class="muted">From a shell: <code>docker compose exec app /app/filehost import --release {{ project.slug }}/{{ release.version }} [folder]</code></p>
 </section>
 
 <section class="card">
@@ -145,7 +202,8 @@ cat SHA256SUMS.asc</code></pre>
   {% if l.is_admin() %}
   <h2>Upload a small file</h2>
   <p>Browser uploads are limited to <strong>{{ max_upload }}</strong> per request (reverse proxies and tunnels
-     such as Cloudflare cap request size and time). For anything larger, use the incoming folder above.</p>
+     such as Cloudflare cap request size and time). For anything larger, use the incoming folder above.
+     Uploads go to the top level of the release.</p>
   {% else %}
   <h2>Upload files</h2>
   <p>Each file can be up to <strong>{{ max_upload }}</strong>, within your storage quota.</p>

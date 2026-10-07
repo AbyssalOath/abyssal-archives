@@ -7,9 +7,10 @@ use sqlx::{AssertSqlSafe, MySqlPool, Result};
 use super::models::*;
 
 const RELEASE_COLUMNS: &str = "r.id, r.project_id, r.version, r.notes_md, r.released_at, \
-     r.sums_signature, r.sums_signed_sha256, r.sums_signed_at, r.review_status, r.review_note";
+     r.sums_signature, r.sums_signed_sha256, r.sums_signed_at, r.recommended_file_id, \
+     r.review_status, r.review_note";
 
-const FILE_COLUMNS: &str = "id, release_id, filename, size_bytes, sha256, sha512, storage_backend, \
+const FILE_COLUMNS: &str = "id, release_id, filename, path, size_bytes, sha256, sha512, storage_backend, \
      storage_key, download_count, status, error_message, torrent_infohash, created_at";
 
 /// True if the error is a unique-key violation (duplicate slug/version).
@@ -714,6 +715,18 @@ pub async fn list_public_releases(db: &MySqlPool, project_id: i64) -> Result<Vec
     .await
 }
 
+/// A release by project slug and version, any review state (admin tools).
+pub async fn find_release(db: &MySqlPool, slug: &str, version: &str) -> Result<Option<Release>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {RELEASE_COLUMNS} FROM releases r \
+         JOIN projects p ON p.id = r.project_id WHERE p.slug = ? AND r.version = ?"
+    )))
+    .bind(slug)
+    .bind(version)
+    .fetch_optional(db)
+    .await
+}
+
 /// A public (approved, of an approved project) release.
 pub async fn get_release_by_slug_version(
     db: &MySqlPool,
@@ -801,6 +814,36 @@ pub async fn set_release_review(
     Ok(())
 }
 
+/// The newest published release of a published project (by release date,
+/// then creation).
+pub async fn latest_public_release(db: &MySqlPool, slug: &str) -> Result<Option<Release>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {RELEASE_COLUMNS} FROM releases r JOIN projects p ON p.id = r.project_id \
+         WHERE p.slug = ? AND p.review_status = 'approved' AND r.review_status = 'approved' \
+         ORDER BY r.released_at DESC, r.id DESC LIMIT 1"
+    )))
+    .bind(slug)
+    .fetch_optional(db)
+    .await
+}
+
+/// Marks (or with None clears) the release's recommended file; the file
+/// must belong to the release.
+pub async fn set_recommended(db: &MySqlPool, release_id: i64, file_id: Option<i64>) -> Result<()> {
+    sqlx::query(
+        "UPDATE releases SET recommended_file_id = ? WHERE id = ? \
+         AND (? IS NULL OR EXISTS (SELECT 1 FROM files WHERE id = ? AND release_id = ?))",
+    )
+    .bind(file_id)
+    .bind(release_id)
+    .bind(file_id)
+    .bind(file_id)
+    .bind(release_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Stores (or with None clears) a release's SHA256SUMS signature.
 pub async fn set_release_signature(
     db: &MySqlPool,
@@ -854,7 +897,7 @@ pub async fn all_ready_files(db: &MySqlPool) -> Result<Vec<FileRow>> {
 /// All files of a release, any status (admin page).
 pub async fn files_for_release(db: &MySqlPool, release_id: i64) -> Result<Vec<FileRow>> {
     sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT {FILE_COLUMNS} FROM files WHERE release_id = ? ORDER BY filename, id"
+        "SELECT {FILE_COLUMNS} FROM files WHERE release_id = ? ORDER BY path, id"
     )))
     .bind(release_id)
     .fetch_all(db)
@@ -882,6 +925,38 @@ pub async fn get_public_file(db: &MySqlPool, id: i64) -> Result<Option<FileRow>>
     .await
 }
 
+/// A published file by its place in the tree:
+/// /p/<slug>/<version>/<path>.
+pub async fn get_public_file_by_path(
+    db: &MySqlPool,
+    slug: &str,
+    version: &str,
+    path: &str,
+) -> Result<Option<FileRow>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {FILE_COLUMNS} FROM files WHERE path = ? AND status = 'ready' AND release_id = \
+         (SELECT r.id FROM releases r JOIN projects p ON p.id = r.project_id \
+          WHERE p.slug = ? AND r.version = ? \
+          AND r.review_status = 'approved' AND p.review_status = 'approved')"
+    )))
+    .bind(path)
+    .bind(slug)
+    .bind(version)
+    .fetch_optional(db)
+    .await
+}
+
+/// The file at `path` in a release, any status.
+pub async fn file_at_path(db: &MySqlPool, release_id: i64, path: &str) -> Result<Option<FileRow>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {FILE_COLUMNS} FROM files WHERE release_id = ? AND path = ?"
+    )))
+    .bind(release_id)
+    .bind(path)
+    .fetch_optional(db)
+    .await
+}
+
 /// (backend, key) of every stored object under a project, for cleanup.
 pub async fn objects_for_project(db: &MySqlPool, project_id: i64) -> Result<Vec<(String, String)>> {
     sqlx::query_as(
@@ -903,6 +978,8 @@ pub async fn objects_for_release(db: &MySqlPool, release_id: i64) -> Result<Vec<
 pub struct NewFile<'a> {
     pub release_id: i64,
     pub filename: &'a str,
+    /// Unique in the release; inserting a taken path is a unique violation.
+    pub path: &'a str,
     pub size_bytes: i64,
     pub sha256: &'a str,
     pub sha512: Option<&'a str>,
@@ -913,11 +990,12 @@ pub struct NewFile<'a> {
 
 pub async fn insert_file(db: &MySqlPool, f: &NewFile<'_>) -> Result<i64> {
     let res = sqlx::query(
-        "INSERT INTO files (release_id, filename, size_bytes, sha256, sha512, storage_backend, storage_key, status) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO files (release_id, filename, path, size_bytes, sha256, sha512, storage_backend, storage_key, status) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(f.release_id)
     .bind(f.filename)
+    .bind(f.path)
     .bind(f.size_bytes)
     .bind(f.sha256)
     .bind(f.sha512)
@@ -1144,4 +1222,279 @@ pub async fn mirror_verify_failed(db: &MySqlPool, id: i64, message: &str) -> Res
     .execute(db)
     .await?;
     Ok(())
+}
+
+// ---- import batches ------------------------------------------------------------
+
+const BATCH_COLUMNS: &str = "b.id, b.release_id, b.source, b.folder, b.created_at, b.finished_at, \
+     COUNT(i.id) AS total, \
+     CAST(COALESCE(SUM(i.status IN ('queued', 'importing')), 0) AS SIGNED) AS queued, \
+     CAST(COALESCE(SUM(i.status = 'done'), 0) AS SIGNED) AS done, \
+     CAST(COALESCE(SUM(i.status = 'skipped'), 0) AS SIGNED) AS skipped, \
+     CAST(COALESCE(SUM(i.status = 'failed'), 0) AS SIGNED) AS failed";
+
+pub async fn create_batch(
+    db: &MySqlPool,
+    release_id: i64,
+    user_id: Option<i64>,
+    source: &str,
+    folder: &str,
+) -> Result<i64> {
+    let res = sqlx::query(
+        "INSERT INTO import_batches (release_id, user_id, source, folder) VALUES (?, ?, ?, ?)",
+    )
+    .bind(release_id)
+    .bind(user_id)
+    .bind(source)
+    .bind(folder)
+    .execute(db)
+    .await?;
+    Ok(res.last_insert_id() as i64)
+}
+
+pub async fn add_item(
+    db: &MySqlPool,
+    batch_id: i64,
+    path: &str,
+    size: i64,
+    status: &str,
+    message: Option<&str>,
+    file_id: Option<i64>,
+) -> Result<i64> {
+    let message = message.map(|m| m.chars().take(500).collect::<String>());
+    let res = sqlx::query(
+        "INSERT INTO import_items (batch_id, path, size_bytes, status, message, file_id, finished_at) \
+         VALUES (?, ?, ?, ?, ?, ?, IF(? IN ('queued', 'importing'), NULL, NOW()))",
+    )
+    .bind(batch_id)
+    .bind(path)
+    .bind(size)
+    .bind(status)
+    .bind(message)
+    .bind(file_id)
+    .bind(status)
+    .execute(db)
+    .await?;
+    Ok(res.last_insert_id() as i64)
+}
+
+pub async fn set_item(
+    db: &MySqlPool,
+    id: i64,
+    status: &str,
+    message: Option<&str>,
+    file_id: Option<i64>,
+) -> Result<()> {
+    let message = message.map(|m| m.chars().take(500).collect::<String>());
+    sqlx::query(
+        "UPDATE import_items SET status = ?, message = ?, file_id = COALESCE(?, file_id), \
+         finished_at = IF(? IN ('queued', 'importing'), NULL, NOW()) WHERE id = ?",
+    )
+    .bind(status)
+    .bind(message)
+    .bind(file_id)
+    .bind(status)
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn finish_batch(db: &MySqlPool, id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE import_batches SET finished_at = NOW() WHERE id = ? AND finished_at IS NULL",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_batch(db: &MySqlPool, id: i64) -> Result<Option<ImportBatch>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {BATCH_COLUMNS} FROM import_batches b LEFT JOIN import_items i ON i.batch_id = b.id \
+         WHERE b.id = ? GROUP BY b.id"
+    )))
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+/// The most recent batches of a release, newest first.
+pub async fn recent_batches(
+    db: &MySqlPool,
+    release_id: i64,
+    limit: i64,
+) -> Result<Vec<ImportBatch>> {
+    sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT {BATCH_COLUMNS} FROM import_batches b LEFT JOIN import_items i ON i.batch_id = b.id \
+         WHERE b.release_id = ? GROUP BY b.id ORDER BY b.id DESC LIMIT ?"
+    )))
+    .bind(release_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+}
+
+/// A batch's items: failures first, then in import order.
+pub async fn batch_items(db: &MySqlPool, batch_id: i64) -> Result<Vec<ImportItem>> {
+    sqlx::query_as(
+        "SELECT id, path, size_bytes, status, message, file_id FROM import_items \
+         WHERE batch_id = ? ORDER BY status = 'failed' DESC, id",
+    )
+    .bind(batch_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Startup: batches cannot survive a restart (rerunning them is safe).
+pub async fn recover_interrupted_batches(db: &MySqlPool) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE import_items SET status = 'failed', message = 'interrupted by restart; run the import again', \
+         finished_at = NOW() WHERE status IN ('queued', 'importing')",
+    )
+    .execute(db)
+    .await?;
+    sqlx::query("UPDATE import_batches SET finished_at = NOW() WHERE finished_at IS NULL")
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// ---- audit log ---------------------------------------------------------------------
+
+pub async fn audit(
+    db: &MySqlPool,
+    user: Option<(i64, &str)>,
+    action: &str,
+    target: &str,
+    detail: Option<&str>,
+) -> Result<()> {
+    let target: String = target.chars().take(700).collect();
+    let detail = detail.map(|d| d.chars().take(1000).collect::<String>());
+    sqlx::query(
+        "INSERT INTO audit_log (user_id, username, action, target, detail) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(user.map(|u| u.0))
+    .bind(user.map(|u| u.1).unwrap_or("system"))
+    .bind(action)
+    .bind(target)
+    .bind(detail)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn recent_audit(db: &MySqlPool, limit: i64) -> Result<Vec<AuditEntry>> {
+    sqlx::query_as(
+        "SELECT created_at, username, action, target, detail FROM audit_log ORDER BY id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await
+}
+
+// ---- R2 copies -------------------------------------------------------------------
+
+/// A published file, as the R2 sync needs it.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SyncFile {
+    pub id: i64,
+    pub slug: String,
+    pub version: String,
+    pub path: String,
+    pub filename: String,
+    pub size_bytes: i64,
+    pub sha256: String,
+    pub storage_backend: String,
+    pub storage_key: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct R2Object {
+    pub file_id: i64,
+    pub object_key: String,
+    pub size_bytes: i64,
+    pub status: String,
+    pub error: Option<String>,
+    pub updated_at: chrono::NaiveDateTime,
+}
+
+/// Every published file (ready, approved release of an approved project).
+pub async fn public_files_for_sync(db: &MySqlPool) -> Result<Vec<SyncFile>> {
+    sqlx::query_as(
+        "SELECT f.id, p.slug, r.version, f.path, f.filename, f.size_bytes, f.sha256, \
+         f.storage_backend, f.storage_key FROM files f \
+         JOIN releases r ON r.id = f.release_id JOIN projects p ON p.id = r.project_id \
+         WHERE f.status = 'ready' AND f.sha256 <> '' \
+         AND r.review_status = 'approved' AND p.review_status = 'approved' \
+         ORDER BY r.released_at DESC, f.path",
+    )
+    .fetch_all(db)
+    .await
+}
+
+pub async fn r2_objects(db: &MySqlPool) -> Result<Vec<R2Object>> {
+    sqlx::query_as(
+        "SELECT file_id, object_key, size_bytes, status, error, updated_at FROM r2_objects",
+    )
+    .fetch_all(db)
+    .await
+}
+
+pub async fn r2_object(db: &MySqlPool, file_id: i64) -> Result<Option<R2Object>> {
+    sqlx::query_as(
+        "SELECT file_id, object_key, size_bytes, status, error, updated_at FROM r2_objects \
+         WHERE file_id = ?",
+    )
+    .bind(file_id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Records an upload result (insert or replace).
+pub async fn r2_record(
+    db: &MySqlPool,
+    file_id: i64,
+    key: &str,
+    size: i64,
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    let error = error.map(|e| e.chars().take(500).collect::<String>());
+    sqlx::query(
+        "INSERT INTO r2_objects (file_id, object_key, size_bytes, status, error) VALUES (?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE object_key = VALUES(object_key), size_bytes = VALUES(size_bytes), \
+         status = VALUES(status), error = VALUES(error), updated_at = NOW()",
+    )
+    .bind(file_id)
+    .bind(key)
+    .bind(size)
+    .bind(status)
+    .bind(error)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn r2_forget(db: &MySqlPool, file_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM r2_objects WHERE file_id = ?")
+        .bind(file_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Failed uploads with the file's place, newest first (admin status page).
+pub async fn r2_failures(
+    db: &MySqlPool,
+    limit: i64,
+) -> Result<Vec<(String, String, chrono::NaiveDateTime)>> {
+    sqlx::query_as(
+        "SELECT o.object_key, COALESCE(o.error, ''), o.updated_at FROM r2_objects o \
+         WHERE o.status = 'failed' ORDER BY o.updated_at DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(db)
+    .await
 }

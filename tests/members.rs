@@ -76,22 +76,6 @@ async fn user_id(db: &sqlx::MySqlPool, name: &str) -> i64 {
         .unwrap()
 }
 
-/// Regular files under `dir`, recursively.
-fn count_files(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| match e.file_type() {
-                    Ok(t) if t.is_dir() => count_files(&e.path()),
-                    Ok(t) if t.is_file() => 1,
-                    _ => 0,
-                })
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
 /// Number after `prefix` in a Location header, e.g. ".../projects/7/releases".
 fn id_in(location: &str, prefix: &str) -> i64 {
     let rest = &location[location.find(prefix).unwrap() + prefix.len()..];
@@ -466,7 +450,7 @@ async fn members() {
         .unwrap();
     assert_eq!(before, after, "nothing stored for refused uploads");
     assert_eq!(
-        count_files(&_dir.path().join("storage")),
+        common::count_files(&_dir.path().join("storage")),
         after as usize,
         "no leftover partial objects"
     );
@@ -661,7 +645,14 @@ async fn members() {
     let r = admin
         .post_form(
             &format!("/admin/users/{alice_id}/delete"),
-            &[("csrf", &csrf), ("confirm", "yes")],
+            &[("csrf", &csrf), ("typed", "alicee")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "wrong name typed");
+    let r = admin
+        .post_form(
+            &format!("/admin/users/{alice_id}/delete"),
+            &[("csrf", &csrf), ("typed", "alice")],
         )
         .await;
     assert_eq!(r.location(), "/admin/users?msg=delete");

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Log</h1>
+<p class="muted">Deletions and publishing changes, newest first (last 500). Also written to the server log.</p>
+{% if entries.is_empty() %}<p class="muted">Nothing logged yet.</p>{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Action</th><th scope="col">What</th><th scope="col">Details</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+  <tr>
+    <td>{{ e.created_at.format("%Y-%m-%d %H:%M UTC") }}</td>
+    <td>{{ e.username }}</td>
+    <td>{{ e.action }}</td>
+    <td><code>{{ e.target }}</code></td>
+    <td>{% if let Some(d) = e.detail %}{{ d }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

@@ -49,6 +49,10 @@ The member area is `/my` (header: My projects, Limits, Account, 2FA):
 - upload files from the browser (when `ALLOW_WEB_UPLOAD=true`), within their
   limits (below);
 - download their own files, published or not, from the files page;
+- mark a release's recommended file (what `/p/<project>/latest/download`
+  serves);
+- deleting something already published needs its version or path typed
+  (docs/DOWNLOADS.md), and is logged;
 - change their password and (with `TOTP_ENABLED=true`) set up 2FA.
 
 Members cannot import from the incoming folder, see storage paths, manage
@@ -102,8 +106,9 @@ can overshoot the quota by at most one file.)
 Per member: approve / reject (pending requests; a rejected request is
 deleted), disable / enable (disabling ends their sessions at once), set
 limits, set a new password (ends their sessions), turn off their 2FA, and
-delete the account **with all its projects and files**. None of these apply
-to the administrator account.
+delete the account **with all its projects and files** (type the username to
+confirm; logged under Admin, Log). None of these apply to the administrator
+account.
 
 ## Security notes
 

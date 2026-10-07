@@ -41,26 +41,34 @@ pub struct AppState {
     pub strippers: Arc<StripperRegistry>,
     /// Short content hash of the stylesheet, used for cache busting.
     pub css_version: Arc<str>,
+    /// Optional Cloudflare R2 download origin (src/r2.rs).
+    r2: Arc<RwLock<crate::r2::R2Settings>>,
+    pub r2_status: Arc<Mutex<crate::r2::SyncStatus>>,
+    /// Wakes the R2 sync job.
+    pub r2_wake: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
-    /// Connects to the database, migrates, syncs settings and opens storage.
+    /// Connects to the database, migrates, syncs settings and opens storage
+    /// (the server: also cleans up after an earlier run).
     pub async fn init(config: Config) -> anyhow::Result<Self> {
+        Self::build(config, true).await
+    }
+
+    /// The same for a command (`filehost import`) running next to the
+    /// server: no restart recovery (it would fail the server's running
+    /// imports) and no background tasks.
+    pub async fn init_for_command(config: Config) -> anyhow::Result<Self> {
+        Self::build(config, false).await
+    }
+
+    async fn build(config: Config, server: bool) -> anyhow::Result<Self> {
         let db = db::connect_and_migrate(&config.database_url).await?;
-        let (failed, rehashed) = queries::recover_interrupted_jobs(&db).await?;
-        if failed > 0 {
-            tracing::warn!(
-                count = failed,
-                "marked imports interrupted by restart as failed"
-            );
-        }
-        if rehashed > 0 {
-            tracing::warn!(
-                count = rehashed,
-                "hash recomputes interrupted by restart; files left as they were"
-            );
+        if server {
+            Self::recover(&db).await?;
         }
         let site = settings::sync_from_env(&db, &config).await?;
+        let r2 = crate::r2::load(&db, config.security.totp_key).await?;
         let storage = StorageRegistry::from_config(&config).map_err(|e| {
             anyhow::anyhow!(
                 "cannot use STORAGE_PATH {}: {e}",
@@ -72,7 +80,9 @@ impl AppState {
         }
         let rate_limit = config.security.rate_limit_per_minute;
         let sec = config.security.clone();
-        spawn_session_cleanup(db.clone(), config.security.session_idle.as_secs());
+        if server {
+            spawn_session_cleanup(db.clone(), config.security.session_idle.as_secs());
+        }
         Ok(Self {
             db,
             config: Arc::new(config),
@@ -94,7 +104,41 @@ impl AppState {
             strippers: Arc::new(StripperRegistry::new()),
             verifying: Arc::new(Mutex::new(HashSet::new())),
             css_version: util::sha256_hex(crate::routes::public::STYLE_CSS.as_bytes())[..12].into(),
+            r2: Arc::new(RwLock::new(r2)),
+            r2_status: Arc::new(Mutex::new(crate::r2::SyncStatus::default())),
+            r2_wake: Arc::new(tokio::sync::Notify::new()),
         })
+    }
+
+    /// Imports and recomputes cannot survive a restart.
+    async fn recover(db: &MySqlPool) -> anyhow::Result<()> {
+        let (failed, rehashed) = queries::recover_interrupted_jobs(db).await?;
+        if failed > 0 {
+            tracing::warn!(
+                count = failed,
+                "marked imports interrupted by restart as failed"
+            );
+        }
+        if rehashed > 0 {
+            tracing::warn!(
+                count = rehashed,
+                "hash recomputes interrupted by restart; files left as they were"
+            );
+        }
+        let items = queries::recover_interrupted_batches(db).await?;
+        if items > 0 {
+            tracing::warn!(count = items, "queued imports interrupted by restart");
+        }
+        Ok(())
+    }
+
+    /// The current R2 settings (secret included; never log them).
+    pub fn r2(&self) -> crate::r2::R2Settings {
+        self.r2.read().unwrap().clone()
+    }
+
+    pub fn set_r2(&self, s: crate::r2::R2Settings) {
+        *self.r2.write().unwrap() = s;
     }
 
     pub fn site(&self) -> SiteSettings {
@@ -109,6 +153,17 @@ impl AppState {
     /// `{DOWNLOAD_BASE_URL}/download/{id}`, or `/download/{id}` when blank.
     pub fn download_url(&self, file_id: i64) -> String {
         util::build_download_url(&self.site.read().unwrap().download_base_url, file_id)
+    }
+
+    /// The stable download URL of a file in a release:
+    /// `{DOWNLOAD_BASE_URL}/p/<slug>/<version>/<path>` (relative when blank).
+    pub fn release_file_url(&self, slug: &str, version: &str, path: &str) -> String {
+        util::build_release_file_url(
+            &self.site.read().unwrap().download_base_url,
+            slug,
+            version,
+            path,
+        )
     }
 
     /// Per-file checksum link, e.g. `/download/7/sha256`.

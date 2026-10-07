@@ -6,14 +6,29 @@ Check in this order: **signature first, then checksums**, then cross-check.
 
 ## 1. Get the files
 
-From the release on the project page (`/p/<project>`):
+Every file has a stable address, `https://<site>/p/<project>/<version>/<path>`,
+shown on the release page (`/p/<project>/<version>`). Paths keep their
+folders (`sources/a.tar.gz`), and so does `SHA256SUMS`, so download into a
+folder that mirrors the release:
 
 ```bash
-curl -fLOJ https://<site>/download/<id>            # -J keeps the real filename
-curl -fLO  https://<site>/p/<project>/<version>/SHA256SUMS
-curl -fLO  https://<site>/p/<project>/<version>/SHA256SUMS.asc
-curl -fL   https://<site>/gpg.pub -o signing-key.asc
+mkdir -p sanctum && cd sanctum
+curl -fLO https://<site>/p/<project>/<version>/<file>.iso
+curl -fLO https://<site>/p/<project>/<version>/SHA256SUMS
+curl -fLO https://<site>/p/<project>/<version>/SHA256SUMS.asc
+curl -fL  https://<site>/gpg.pub -o signing-key.asc
+# a file in a folder keeps its folder:
+curl -fL --create-dirs -o sources/a.tar.gz https://<site>/p/<project>/<version>/sources/a.tar.gz
 ```
+
+Downloads resume (`curl -C - -O ...`, `wget -c ...`). The newest release's
+recommended file is always at `https://<site>/p/<project>/latest/download`
+(one redirect to its versioned address: use `curl -fLOJ` or
+`wget --content-disposition` to keep its real name).
+
+To fetch a whole release, or check an upload from a script, use the
+machine-readable list `https://<site>/p/<project>/<version>/files.json`
+(below).
 
 ## 2. Verify the signature
 
@@ -37,8 +52,38 @@ sha256sum -c --ignore-missing SHA256SUMS
 sha512sum -c --ignore-missing SHA512SUMS
 ```
 
-Each downloaded file must report `OK`. (`--ignore-missing` skips release
-files you did not download.)
+Run it from the folder you downloaded into (the release's root): entries
+look like `<hash>  sources/a.tar.gz`. Each downloaded file must report
+`OK`. (`--ignore-missing` skips release files you did not download.) A
+folder may also carry its own checksum file from the project, e.g.
+`sources/SHA256SUMS`; check that one from inside `sources/`.
+
+### files.json
+
+`/p/<project>/<version>/files.json` lists every file with its path, size,
+SHA-256, SHA-512 and absolute URL (from `PUBLIC_URL` or `DOWNLOAD_BASE_URL`):
+
+```json
+{
+  "project": "abyssal-sanctum",
+  "version": "v0.1.0",
+  "released_at": "2026-10-07",
+  "recommended": "abyssal-sanctum-v0.1.0-secureboot.iso",
+  "files": [
+    { "path": "sources/a.tar.gz", "size": 12345, "sha256": "...", "sha512": "...",
+      "url": "https://<site>/p/abyssal-sanctum/v0.1.0/sources/a.tar.gz" }
+  ]
+}
+```
+
+Fetch a whole release and verify it:
+
+```bash
+curl -fsS https://<site>/p/<project>/<version>/files.json |
+  jq -r '.files[] | "\(.url) \(.path)"' |
+  while read -r url path; do curl -fsSL --create-dirs -C - -o "$path" "$url"; done
+curl -fsSLO https://<site>/p/<project>/<version>/SHA256SUMS && sha256sum -c SHA256SUMS
+```
 
 ## 4. Cross-check with a second source
 
@@ -48,6 +93,16 @@ GitHub). Two independent places agreeing makes a quietly swapped file on
 one of them very unlikely to go unnoticed.
 
 ---
+
+## For the operator: checking an upload
+
+After importing, compare the server's list with your local build tree
+(run from the release's root folder on your machine):
+
+```bash
+curl -fsS https://<site>/p/<project>/<version>/files.json |
+  jq -r '.files[] | "\(.sha256)  \(.path)"' | sha256sum -c --quiet && echo "upload matches"
+```
 
 ## For the operator: signing a release
 

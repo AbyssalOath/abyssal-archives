@@ -12,11 +12,18 @@ The site's name is not built in: you choose it at install time and can change
 it any time from the admin settings page. (The code itself is called
 `filehost`; nothing in it carries a brand.)
 
-- Public: project list, project pages (Markdown descriptions and release notes),
-  file downloads with HTTP Range / resume support, optional mirror and torrent
-  links per file.
+- Public: project list, project and release pages (Markdown descriptions and
+  release notes), releases with folders (`sources/a.tar.gz`, collapsed on the
+  page, main downloads first), a recommended file per release, and **stable
+  direct download URLs** (`/p/<project>/<version>/<path>`, plain GET with
+  Range / resume, works with curl and wget), plus `/p/<project>/latest` and
+  `/p/<project>/latest/download` ([docs/DOWNLOADS.md](docs/DOWNLOADS.md)).
+- Optional **Cloudflare R2** download origin (Admin, Storage): published files
+  are copied to your bucket and the same URLs redirect there, while this
+  server keeps the master copy ([docs/DOWNLOADS.md](docs/DOWNLOADS.md)).
 - Integrity: SHA-256 and SHA-512 for every file (computed in one streaming pass),
-  plus `SHA256SUMS` / `SHA512SUMS` per release for `sha256sum -c`.
+  `SHA256SUMS` / `SHA512SUMS` per release (by path, for `sha256sum -c`), and a
+  machine-readable `files.json` per release.
 - Hardened by default (see [Security](#security)): no cookies or trackers for
   visitors, strict CSP, session/CSRF/Origin protection, rate limits, optional
   TOTP 2FA, distroless read-only container.
@@ -28,9 +35,15 @@ it any time from the admin settings page. (The code itself is called
   by the admin or requested at /register and approved; each member manages only
   their own projects, within an upload limit and storage quota, and (by
   default) nothing they publish is public until the admin reviews it.
-- Large files (multi-GB ISOs) are copied to the server out of band (rsync, scp,
-  SMB) into an **incoming folder** and **imported** in the background. Small
-  files can also be uploaded from the browser.
+- Large files (multi-GB ISOs, hundreds of source tarballs) are copied to the
+  server out of band (rsync, scp, SMB) into an **incoming folder** and
+  **imported** in the background: one file, a folder, or everything at once
+  (also from the command line), with per-file results; reruns skip what is
+  already there and existing files are never overwritten. Small files can also
+  be uploaded from the browser.
+- No casual deletion: published releases and files are deleted only by typing
+  their name, unpublishing hides a release but keeps its files, and deletions
+  and publishing changes are logged.
 - Black-and-red theme with a slow pulsating glow (CSS only, disabled for
   `prefers-reduced-motion`).
 
@@ -182,13 +195,20 @@ Reverse proxies and tunnels limit request bodies and request time (Cloudflare:
 about 100 MB and 100 seconds), so multi-GB browser uploads cannot work behind
 them. Instead:
 
-1. Copy the file into the incoming folder, e.g.
-   `rsync -avP --partial-dir=.rsync-partial my.iso user@server:/path/to/incoming/`
-2. In /admin, open the release's **Files** page and click **Import** next to it.
-3. The import runs in the background (hash, then move into storage). The page
-   refreshes itself until the file shows **ready**.
+1. Copy the files into the incoming folder, folders included, e.g.
+   `rsync -avP --partial-dir=.rsync-partial sources-v0.1.0/ USER@SITEHOST:/data/incoming/sources/`
+   (up to 3 folder levels; use your `INCOMING_HOST_PATH`).
+2. In /admin, open the release's **Files** page and click **Import all** (or
+   **Import all in sources/**, or **Import** on one file), or from a shell:
+   `docker compose exec app /app/filehost import --release <project>/<version> [folder]`.
+3. Files are imported one at a time in the background (hash, then move into
+   storage), keeping their paths: `sources/a.tar.gz` stays `sources/a.tar.gz`
+   in the file list, its URL and `SHA256SUMS`. The batch page shows progress
+   and a result per file.
 
-Details, permissions and tips: [docs/IMPORT.md](docs/IMPORT.md).
+Existing paths are never overwritten, and files already imported with the
+same SHA-256 are skipped, so an import can simply be run again. Details,
+permissions, free space and tips: [docs/IMPORT.md](docs/IMPORT.md).
 
 ## Checksums
 
@@ -199,15 +219,19 @@ originals. Verification files are generated from the database on each request:
 
 | URL | Content |
 |---|---|
-| `/p/<slug>/<version>/SHA256SUMS` | `<sha256>  <filename>` for every ready file of the release |
+| `/p/<slug>/<version>/SHA256SUMS` | `<sha256>  <path>` for every ready file of the release, e.g. `sources/a.tar.gz` |
 | `/p/<slug>/<version>/SHA512SUMS` | same with SHA-512 (files without one are left out) |
+| `/p/<slug>/<version>/files.json` | path, size, SHA-256, SHA-512 and URL of every file |
 | `/download/<id>/sha256`, `/download/<id>/sha512` | the single line for one file |
 
 ```bash
-curl -OJ https://<site>/download/12          # -J keeps the real filename
-curl -O  https://<site>/p/<slug>/<version>/SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS     # --ignore-missing: only the files you downloaded
+curl -fLO https://<site>/p/<slug>/<version>/<file>.iso
+curl -fLO https://<site>/p/<slug>/<version>/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS     # from the folder you downloaded into
 ```
+
+See [docs/VERIFYING.md](docs/VERIFYING.md) for signatures, folders and
+fetching a whole release with `files.json`.
 
 Files from before SHA-512 was added show "n/a"; **Recompute hashes** on the
 admin Files page backfills it. Recomputing re-reads the stored file in the
@@ -276,6 +300,15 @@ Import `caddy-root.crt` as a trusted root CA on each client (Windows:
 `/usr/local/share/ca-certificates/` + `update-ca-certificates`; Firefox has
 its own certificate store). Caddy's certificate data lives in the `caddy_data`
 volume, so the root stays the same across restarts. See `Caddyfile.example`.
+
+## Downloads behind Cloudflare
+
+Scripted downloads must never get a Cloudflare challenge page. Bot Fight
+Mode, "I'm Under Attack" mode, Browser Integrity Check and challenge or rate
+limiting rules must stay off (or be skipped) for `/p/` and `/download/`; the
+exact settings, a check command, and how to move downloads off the tunnel
+(Cloudflare R2, set up in Admin, Storage, or a direct download hostname)
+without changing any URL are in [docs/DOWNLOADS.md](docs/DOWNLOADS.md).
 
 ## A separate download hostname
 
@@ -358,12 +391,14 @@ STORAGE_PATH=./data/dev-storage INCOMING_PATH=./data/dev-incoming cargo run
 cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
 cargo test                              # unit tests
 TEST_DATABASE_URL=mysql://root:<root-password>@127.0.0.1:<DB_PORT>/filehost_test cargo test   # + database tests
-cargo test -- --ignored                # one network test: mirror Verify against a real public file
+cargo test -- --ignored                # network tests: mirror Verify against a real public file,
+                                        # and R2 against a local S3 server (needs R2_ENDPOINT_OVERRIDE,
+                                        # R2_SIGNING_REGION=us-east-1, R2_TEST_KEY/_SECRET/_BUCKET; see src/r2.rs)
 python3 tests/browser/flow.py http://localhost:8080   # real-browser flow (Playwright), FRESH site only
 ```
 
 The database tests (`tests/integration.rs`, `tests/security.rs`,
-`tests/members.rs`) drive the full router against a real MariaDB. They
+`tests/members.rs`, `tests/releases.rs`) drive the full router against a real MariaDB. They
 **wipe the database they are given**, so use a dedicated one. Without
 `TEST_DATABASE_URL` they skip. Queries are runtime-checked
 (`sqlx::query`), so building never needs a database. Migrations in
@@ -373,14 +408,18 @@ The database tests (`tests/integration.rs`, `tests/security.rs`,
 
 ```
 src/
-  main.rs            CLI entry (serve, `healthcheck` for Docker)
+  main.rs            CLI entry (serve, `import`, `admin reset-2fa`, `healthcheck`)
   lib.rs             module list, server startup
   config.rs          env parsing and validation
   state.rs           AppState, download URL helpers
   settings.rs        site settings (env seeding, admin overrides)
-  routes/            public.rs, auth.rs (setup, register, login, roles),
+  routes/            public.rs (pages, stable URLs, latest, files.json),
+                     auth.rs (setup, register, login, roles),
                      admin.rs (admin + member workspace), members.rs (users,
                      review, limits), account.rs, mod.rs (router, middleware)
+  importer.rs        bulk imports: batches, duplicates, skips, free space
+  r2.rs              optional Cloudflare R2 copy: S3 SigV4 client, sync job
+  tree.rs            release files as a folder tree for the templates
   db/                models.rs, queries.rs, mod.rs (pool + migrations)
   storage/           mod.rs (StorageBackend trait), local.rs, smb.rs (stub)
   incoming.rs        incoming-folder scan and path validation
@@ -405,8 +444,8 @@ scripts/             set-site-name.sh, set-download-url.sh, check-seeder-ip.sh,
                      lib/env.sh, lib/qbittorrent.sh, lib/seeder-setup.sh
 docs/                IMPORT.md, STORAGE.md, MIRRORS.md, SANITIZE.md, TORRENTS.md,
                      FUTURE.md, SECURITY-REVIEW.md, HARDENING.md, PRIVACY.md,
-                     VERIFYING.md, BACKUP.md, MEMBERS.md
-tests/               integration.rs, security.rs, members.rs (database),
+                     VERIFYING.md, BACKUP.md, MEMBERS.md, DOWNLOADS.md
+tests/               integration.rs, security.rs, members.rs, releases.rs (database),
                      browser/flow.py (headless Chromium)
 ```
 

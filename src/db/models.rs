@@ -65,6 +65,8 @@ pub struct Release {
     /// SHA-256 of the SHA256SUMS content the signature was made for.
     pub sums_signed_sha256: Option<String>,
     pub sums_signed_at: Option<NaiveDateTime>,
+    /// The file /p/<project>/latest/download serves.
+    pub recommended_file_id: Option<i64>,
     /// See [`review`]; only approved releases (of approved projects) are public.
     pub review_status: String,
     pub review_note: Option<String>,
@@ -83,7 +85,10 @@ pub mod status {
 pub struct FileRow {
     pub id: i64,
     pub release_id: i64,
+    /// Last component of `path` (display, Content-Disposition).
     pub filename: String,
+    /// Place in the release tree, e.g. "sources/a.tar.gz" (unique per release).
+    pub path: String,
     pub size_bytes: i64,
     pub sha256: String,
     /// None for rows created before SHA-512 existed (until recomputed).
@@ -178,6 +183,53 @@ pub struct Stats {
     pub files: i64,
     pub bytes: i64,
     pub downloads: i64,
+}
+
+/// An import batch with its item counts.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ImportBatch {
+    pub id: i64,
+    pub release_id: i64,
+    /// "web" or "cli".
+    pub source: String,
+    pub folder: String,
+    pub created_at: NaiveDateTime,
+    pub finished_at: Option<NaiveDateTime>,
+    pub total: i64,
+    pub queued: i64,
+    pub done: i64,
+    pub skipped: i64,
+    pub failed: i64,
+}
+
+/// One file of an import batch.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ImportItem {
+    pub id: i64,
+    pub path: String,
+    pub size_bytes: i64,
+    /// See [`item`].
+    pub status: String,
+    pub message: Option<String>,
+    pub file_id: Option<i64>,
+}
+
+/// Import item states.
+pub mod item {
+    pub const QUEUED: &str = "queued";
+    pub const IMPORTING: &str = "importing";
+    pub const DONE: &str = "done";
+    pub const SKIPPED: &str = "skipped";
+    pub const FAILED: &str = "failed";
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AuditEntry {
+    pub created_at: NaiveDateTime,
+    pub username: String,
+    pub action: String,
+    pub target: String,
+    pub detail: Option<String>,
 }
 
 /// An admin-curated mirror of a file (`file_mirrors`).

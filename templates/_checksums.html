@@ -1,0 +1,6 @@
+<p class="checksums">
+  <a href="{{ r.sha256sums_url }}">SHA256SUMS</a> · <a href="{{ r.sha512sums_url }}">SHA512SUMS</a>
+  {% if let Some(sig) = r.signature_url %} · <a href="{{ sig }}">SHA256SUMS.asc</a>{% if has_gpg_key %} (<a href="/gpg.pub">signing key</a>){% endif %}{% endif %}
+  · <a href="{{ r.files_json_url }}">files.json</a>
+  <span class="muted">· verify from the folder you downloaded into with</span> <code class="hash">{{ r.verify_hint }} --ignore-missing</code>
+</p>

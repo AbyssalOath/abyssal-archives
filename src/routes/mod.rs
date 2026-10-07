@@ -6,6 +6,7 @@ pub mod admin;
 pub mod auth;
 pub mod members;
 pub mod public;
+pub mod storage;
 
 use std::net::SocketAddr;
 
@@ -72,6 +73,7 @@ pub fn router(state: AppState) -> Router {
         .merge(account::routes())
         .merge(admin::routes(&state.config))
         .merge(members::routes())
+        .merge(storage::routes())
         .fallback(public::not_found)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(

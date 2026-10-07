@@ -56,6 +56,11 @@ language. "The operator" is whoever runs this site.
 - Members' upload limit / quota overrides and their requests for more (the
   values asked for, the reason they give, the admin's decision and note).
 - Deleting a member deletes their account, projects and files.
+- The **audit log** (Admin, Log) records deletions of projects, releases,
+  files and accounts, and publishing changes: when, which account (username),
+  what (e.g. `abyssal-sanctum/v0.1.0/sources/a.tar.gz`) and short details
+  (size, SHA-256). No IP addresses. It is kept until removed from the
+  database by hand.
 - Sessions: only a SHA-256 hash of the session token is stored, with
   creation/last-activity times and expiry. Expired sessions are deleted.
 - The admin pages are never cached (`Cache-Control: no-store`).
@@ -69,6 +74,11 @@ language. "The operator" is whoever runs this site.
 | Mirror **Verify** (admin click) | one HTTP(S) download of the mirror URL; reveals this server's IP (or the `VERIFY_PROXY_URL` proxy's) | the mirror host |
 | **Seeder** profile (qBittorrent behind a VPN) | BitTorrent traffic for torrents you add | peers, via your VPN provider |
 | Caddy with a domain | ACME certificate requests | Let's Encrypt |
+| **Cloudflare R2** (Admin, Storage) | published files (uploads and deletions, signed with your R2 API key) | Cloudflare R2 |
+
+With R2 serving downloads, visitors' browsers are redirected to your R2
+custom domain, so Cloudflare (not this server) sees those requests. The
+redirect itself carries no visitor data.
 
 The app never phones home, checks for updates, or contacts Archive.org,
 GitHub or any other service on its own. Mirror discovery and federation are

@@ -1,5 +1,12 @@
 <form method="post" action="{{ delete_action }}" class="form danger-zone">
   <input type="hidden" name="csrf" value="{{ l.csrf() }}">
+  {% if delete_typed.is_empty() %}
   <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> {{ delete_label }}</label>
+  {% else %}
+  <p>This is <strong>published</strong>: people can download it. To hide it but keep its files, unpublish it
+    instead. To delete it for good (this is logged), type <code>{{ delete_typed }}</code>:</p>
+  <label for="typed">{{ delete_label }}</label>
+  <input id="typed" name="typed" required autocomplete="off" spellcheck="false">
+  {% endif %}
   <button type="submit" class="btn btn-danger">Delete</button>
 </form>

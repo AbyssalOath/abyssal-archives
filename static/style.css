@@ -281,3 +281,12 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1.1rem; height: 1.1
   .file-actions { width: 100%; }
   .btn-download { flex: 1; text-align: center; }
 }
+
+/* Folder trees (release page, admin files page): plain <details>, no JS. */
+.folder { list-style: none; }
+.folder > details > summary { cursor: pointer; padding: 0.4rem 0; }
+.folder > details > .file-list { margin-left: 1rem; border-left: 1px solid var(--border); padding-left: 0.75rem; }
+.folder-name { color: var(--fg-strong); }
+.folder-summary { margin: 0.25rem 0; }
+details.folder { margin: 0.5rem 0; }
+.file-recommended { border-color: var(--accent); }

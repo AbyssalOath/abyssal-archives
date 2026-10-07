@@ -1,0 +1,13 @@
+<li class="file{% if f.recommended %} file-recommended{% endif %}">
+  <div class="file-info">
+    <span class="file-name">{{ f.path }}{% if f.recommended %} <span class="badge">Recommended</span>{% endif %}</span>
+    <span class="file-meta">{{ f.size }} · {{ f.downloads }} download{% if f.downloads != 1 %}s{% endif %}</span>
+    <span class="file-hash"><a href="{{ f.sha256_url }}" class="hash-label">SHA-256</a> <code class="hash">{{ f.sha256 }}</code></span>
+    <span class="file-hash">{% if let Some(url) = f.sha512_url %}<a href="{{ url }}" class="hash-label">SHA-512</a>{% else %}<span class="hash-label">SHA-512</span>{% endif %} <code class="hash">{% if let Some(h) = f.sha512 %}{{ h }}{% else %}n/a{% endif %}</code></span>
+  </div>
+  <div class="file-actions">
+    <a class="btn btn-download{% if f.recommended %} glow{% endif %}" href="{{ f.download_url }}">Download</a>
+    {% for m in f.mirrors %}<a class="btn" href="{{ m.url }}" rel="noopener noreferrer nofollow">{{ m.text }}</a>{% endfor %}
+    {% if let Some(t) = f.torrent_url %}<a class="btn" href="{{ t }}">Torrent</a>{% endif %}
+  </div>
+</li>

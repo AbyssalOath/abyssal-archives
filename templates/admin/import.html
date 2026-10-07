@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="crumbs"><a href="/admin/projects">Projects</a> / <a href="/admin/projects/{{ project.id }}/releases">{{ project.name }}</a> /
+  <a href="/admin/releases/{{ release.id }}/files">{{ release.version }}</a> /</p>
+<h1>Import #{{ batch.id }} {% if batch.running %}<span class="status status-pending">running</span>{% else %}<span class="status status-approved">finished</span>{% endif %}</h1>
+<p>{{ batch.created }} · {% if batch.folder.is_empty() %}incoming folder{% else %}<code>{{ batch.folder }}/</code>{% endif %}</p>
+<ul class="stats">
+  <li class="card stat"><span class="stat-value">{{ batch.done + batch.skipped + batch.failed }} / {{ batch.total }}</span> processed</li>
+  <li class="card stat"><span class="stat-value">{{ batch.done }}</span> imported</li>
+  <li class="card stat"><span class="stat-value">{{ batch.skipped }}</span> skipped (already there)</li>
+  <li class="card stat"><span class="stat-value">{{ batch.failed }}</span> failed</li>
+</ul>
+{% if batch.running %}<p class="muted" role="status">Files are imported one at a time. This page refreshes every 5 seconds;
+  you can leave it, the import keeps running.</p>{% endif %}
+{% if !batch.running && batch.failed > 0 %}<p class="alert alert-error">{{ batch.failed }} file(s) failed (listed first). Fix the cause
+  and run the import again: imported files are skipped.</p>{% endif %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th scope="col">Path</th><th scope="col">Size</th><th scope="col">Result</th><th scope="col">Details</th></tr></thead>
+  <tbody>
+  {% for i in items %}
+  <tr>
+    <td><code>{{ i.path }}</code></td>
+    <td>{{ i.size }}</td>
+    <td><span class="status status-{{ i.status }}">{{ i.status }}</span></td>
+    <td>{{ i.message }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

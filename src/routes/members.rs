@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 
-use super::admin::{MemberCaps, delete_objects, size_input};
+use super::admin::{MemberCaps, audit, delete_objects, size_input};
 use super::auth::{Actor, AdminUser, hash_password, password_problem, valid_username};
 use crate::config::parse_size;
 use crate::db::models::{LimitRequest, ReviewItem, UserRow, account, review};
@@ -148,11 +148,16 @@ async fn project_review(
 ) -> Result<Response, AppError> {
     admin.verify_csrf(&f.csrf)?;
     let (status, note) = f.decide()?;
-    queries::get_project(&st.db, id)
+    let p = queries::get_project(&st.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
     queries::set_project_review(&st.db, id, status, note.as_deref()).await?;
-    tracing::info!(project_id = id, status, "project reviewed");
+    let action = if status == review::APPROVED {
+        "publish-project"
+    } else {
+        "unpublish-project"
+    };
+    audit(&st, &admin, action, &p.slug, note.as_deref()).await;
     Ok(review_redirect(
         &f.back,
         format!("/admin/projects/{id}/edit"),
@@ -169,11 +174,20 @@ async fn release_review(
 ) -> Result<Response, AppError> {
     admin.verify_csrf(&f.csrf)?;
     let (status, note) = f.decide()?;
-    queries::get_release(&st.db, id)
+    let r = queries::get_release(&st.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let p = queries::get_project(&st.db, r.project_id)
         .await?
         .ok_or(AppError::NotFound)?;
     queries::set_release_review(&st.db, id, status, note.as_deref()).await?;
-    tracing::info!(release_id = id, status, "release reviewed");
+    let action = if status == review::APPROVED {
+        "publish-release"
+    } else {
+        "unpublish-release"
+    };
+    let target = format!("{}/{}", p.slug, r.version);
+    audit(&st, &admin, action, &target, note.as_deref()).await;
     Ok(review_redirect(
         &f.back,
         format!("/admin/releases/{id}/edit"),
@@ -386,7 +400,6 @@ async fn user_create(
 #[derive(Deserialize)]
 struct UserActionForm {
     csrf: String,
-    confirm: Option<String>,
     #[serde(default)]
     upload_limit: String,
     #[serde(default)]
@@ -395,6 +408,9 @@ struct UserActionForm {
     password: String,
     #[serde(default)]
     password_confirm: String,
+    /// Typed username, to delete an account.
+    #[serde(default)]
+    typed: String,
 }
 
 /// approve / reject (pending requests), disable / enable, limits,
@@ -455,10 +471,12 @@ async fn user_action(
             queries::reset_totp(&st.db, Some(&user.username)).await?;
         }
         "delete" => {
-            if f.confirm.is_none() {
-                return fail("Tick the confirmation box to delete the account.").await;
+            if f.typed.trim() != user.username {
+                return fail("Type the username exactly to delete the account.").await;
             }
             if let Some(objects) = queries::delete_member(&st.db, id, false).await? {
+                let detail = format!("{} projects, {} files", user.projects, objects.len());
+                audit(&st, &admin, "delete-account", &user.username, Some(&detail)).await;
                 delete_objects(&st, objects).await;
             }
         }

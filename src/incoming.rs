@@ -7,8 +7,10 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Directory depth scanned below INCOMING_PATH (1 = files directly inside).
-pub const MAX_DEPTH: usize = 3;
+/// Path components scanned below INCOMING_PATH (1 = files directly inside,
+/// 4 = three folder levels, e.g. `a/b/c/file`). Also the deepest path a
+/// file can have inside a release.
+pub const MAX_DEPTH: usize = 4;
 
 /// Suffixes used by copy tools for unfinished transfers.
 const PARTIAL_SUFFIXES: [&str; 4] = [".part", ".partial", ".tmp", ".crdownload"];
@@ -177,10 +179,11 @@ mod tests {
     fn setup() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("incoming");
-        fs::create_dir_all(root.join("a/b/c")).unwrap();
+        fs::create_dir_all(root.join("a/b/c/d")).unwrap();
         fs::write(root.join("top.iso"), b"1234").unwrap();
         fs::write(root.join("a/b/deep.img"), b"x").unwrap();
-        fs::write(root.join("a/b/c/too-deep.iso"), b"x").unwrap();
+        fs::write(root.join("a/b/c/deepest.iso"), b"x").unwrap();
+        fs::write(root.join("a/b/c/d/too-deep.iso"), b"x").unwrap();
         fs::write(root.join(".rsync-temp.iso.Ab12"), b"x").unwrap();
         fs::write(root.join("big.iso.part"), b"x").unwrap();
         fs::write(root.join("dl.CRDOWNLOAD"), b"x").unwrap();
@@ -202,7 +205,7 @@ mod tests {
             .into_iter()
             .map(|c| c.rel_path)
             .collect();
-        assert_eq!(names, vec!["a/b/deep.img", "top.iso"]);
+        assert_eq!(names, vec!["a/b/c/deepest.iso", "a/b/deep.img", "top.iso"]);
     }
 
     #[test]
@@ -222,6 +225,7 @@ mod tests {
         let p = resolve(&r, "top.iso", NO_AGE, SystemTime::now()).unwrap();
         assert_eq!(p, r.canonicalize().unwrap().join("top.iso"));
         assert!(resolve(&r, "a/b/deep.img", NO_AGE, SystemTime::now()).is_ok());
+        assert!(resolve(&r, "a/b/c/deepest.iso", NO_AGE, SystemTime::now()).is_ok());
     }
 
     #[test]
@@ -238,7 +242,7 @@ mod tests {
             "a\\..\\..\\secret.txt",
             "",
             "top.iso\0",
-            "a/b/c/too-deep.iso",
+            "a/b/c/d/too-deep.iso",
         ] {
             assert!(
                 matches!(

@@ -105,7 +105,8 @@
         </div>
         <form method="post" action="/admin/users/{{ u.id }}/delete" class="form danger-zone">
           <input type="hidden" name="csrf" value="{{ csrf }}">
-          <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> Yes, delete {{ u.username }} with all their projects and files</label>
+          <label for="del-{{ u.id }}">To delete {{ u.username }} with all their projects and files (logged), type <code>{{ u.username }}</code></label>
+          <input id="del-{{ u.id }}" name="typed" required autocomplete="off" spellcheck="false">
           <button type="submit" class="btn btn-small btn-danger">Delete account</button>
         </form>
       </details>

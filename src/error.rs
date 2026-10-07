@@ -10,6 +10,8 @@ use crate::storage::StorageError;
 #[derive(Debug)]
 pub enum AppError {
     NotFound,
+    /// 404 with a specific explanation.
+    NotFoundMsg(String),
     BadRequest(String),
     Forbidden(String),
     PayloadTooLarge(String),
@@ -39,6 +41,7 @@ impl AppError {
                 StatusCode::NOT_FOUND,
                 "The page you asked for does not exist.".into(),
             ),
+            AppError::NotFoundMsg(m) => (StatusCode::NOT_FOUND, m.clone()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::PayloadTooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),

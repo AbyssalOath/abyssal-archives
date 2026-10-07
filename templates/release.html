@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="project">
+  <p class="crumbs"><a href="/p/{{ slug }}">{{ name }}</a> /</p>
+  <h1>{{ name }} {{ r.version }}{% if is_latest %} <span class="badge">Latest</span>{% endif %}</h1>
+  <p class="muted"><time datetime="{{ r.date }}">{{ r.date }}</time> · {{ r.file_count }} files, {{ r.total_size }}</p>
+  {% if let Some(url) = r.recommended_url %}
+  <p><a class="btn btn-download glow" href="{{ url }}">Download the recommended file</a></p>
+  {% endif %}
+  {% if !r.notes_html.is_empty() %}<section class="card prose">{{ r.notes_html|safe }}</section>{% endif %}
+
+  <section class="card release">
+    <h2>Files</h2>
+    {% if r.tree.is_empty() %}
+    <p class="muted">No files in this release yet.</p>
+    {% else %}
+    <ul class="file-list">
+    {% for row in r.tree %}
+      {% if row.kind == "open" %}
+      <li class="folder"><details><summary><span class="folder-name">{{ row.path }}/</span> <span class="muted">{{ row.files }} files, {{ row.size }}</span></summary>
+      <ul class="file-list">
+      {% else if row.kind == "close" %}
+      </ul></details></li>
+      {% else if let Some(f) = row.item %}
+      {% include "_file.html" %}
+      {% endif %}
+    {% endfor %}
+    </ul>
+    {% include "_checksums.html" %}
+    <p class="muted">Every file has a stable address, <code>{{ r.page_url }}/&lt;path&gt;</code>, that works with
+      <code>curl -fLO</code> and <code>wget -c</code> (resume supported). See also <a href="/p/{{ slug }}/latest">/p/{{ slug }}/latest</a>.</p>
+    {% endif %}
+  </section>
+</article>
+{% endblock %}

@@ -169,7 +169,10 @@ If `.env` (or a backup of it) was exposed:
   update `.env` (`MARIADB_PASSWORD`, `DATABASE_URL`), `docker compose up -d app`.
 - `MARIADB_ROOT_PASSWORD`: same with `ALTER USER 'root'@'%'` and `'root'@'localhost'`.
 - `TOTP_ENCRYPTION_KEY`: run `admin reset-2fa`, replace the key
-  (`openssl rand -base64 32`), restart, re-enrol.
+  (`openssl rand -base64 32`), restart, re-enrol. It also seals the stored R2 secret: enter that
+  again in Admin, Storage after replacing the key.
+- R2 API token (Admin, Storage): create a new token in Cloudflare, paste
+  both keys and Save, then delete the old token.
 - `QBT_PASSWORD`: `scripts/disable-seeder.sh` (remove credentials), then
   `scripts/enable-seeder.sh` (generates a new one and updates qBittorrent).
 - VPN credentials: rotate at the provider, update `.env`, `docker compose up -d gluetun qbittorrent`.

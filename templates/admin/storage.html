@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block content %}
+{% let csrf = l.csrf() %}
+<h1>Download storage</h1>
+{% if let Some(m) = flash %}<p class="alert alert-ok" role="status">{{ m }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="alert alert-error" role="alert">{{ e }}</p>{% endif %}
+
+<section class="card">
+  <h2>Where downloads come from</h2>
+  {% if configured && serve %}
+  <p><strong>Cloudflare R2</strong> for every published file already copied there ({{ uploaded_files }} of {{ published_files }});
+    the rest from this server. Download links do not change: <code>/p/&lt;project&gt;/&lt;version&gt;/&lt;path&gt;</code>
+    answers with one redirect to the R2 copy.</p>
+  {% else %}
+  <p><strong>This server</strong> serves every download{% if configured %} (R2 is set up but serving from it is off){% endif %}.</p>
+  {% endif %}
+  <p class="muted">This server always keeps the master copy of every file. R2 only ever holds published files:
+    unpublished or deleted ones are removed from the bucket within about a minute.</p>
+</section>
+
+{% if configured %}
+<section class="card">
+  <h2>Sync</h2>
+  <ul class="stats">
+    <li class="card stat"><span class="stat-value">{{ uploaded_files }} / {{ published_files }}</span> published files on R2</li>
+    <li class="card stat"><span class="stat-value">{{ uploaded_size }}</span> of {{ published_size }}</li>
+    <li class="card stat"><span class="stat-value">{{ failed_files }}</span> failed</li>
+  </ul>
+  {% if running %}<p role="status">Running{% if !current.is_empty() %}: uploading <code>{{ current }}</code>{% endif %}. This page refreshes every 10 seconds.</p>
+  {% else if !last_finished.is_empty() %}<p class="muted">Last run {{ last_finished }}: {{ last_result }}.</p>{% endif %}
+  {% if !sync %}<p class="muted">Uploads are off: nothing new is copied (removals still happen).</p>{% endif %}
+  <form method="post" action="/admin/storage/sync" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="btn">Sync now (retry failures)</button>
+  </form>
+  {% if !failures.is_empty() %}
+  <h3>Recent failures</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">Object</th><th scope="col">Error</th><th scope="col">When</th></tr></thead>
+    <tbody>{% for f in failures %}<tr><td><code>{{ f.0 }}</code></td><td>{{ f.1 }}</td><td>{{ f.2 }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  <p class="muted">Failed uploads are retried every 15 minutes, or now with Sync now.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Cloudflare R2</h2>
+  <p>Optional. Needs an R2 subscription on your Cloudflare account. Steps (details in docs/DOWNLOADS.md):</p>
+  <ol>
+    <li>R2: create a bucket (e.g. <code>abyssal-downloads</code>).</li>
+    <li>The bucket's Settings, <strong>Custom Domains</strong>: connect a hostname of your zone, e.g.
+      <code>dl.example.com</code> (not the r2.dev URL: it is rate-limited and for development only).</li>
+    <li>R2, <strong>Manage API tokens</strong>: create a token with <strong>Object Read &amp; Write</strong> for
+      <strong>that bucket only</strong>; copy its Access Key ID and Secret Access Key.</li>
+    <li>Fill in the form, <strong>Test</strong>, then turn on uploads; once the sync shows your files, turn on serving.</li>
+  </ol>
+  {% if !key_available %}
+  <p class="alert alert-error">TOTP_ENCRYPTION_KEY is not set in <code>.env</code>, which is needed to store the secret
+    encrypted. Run <code>./install.sh</code> (it adds the key without changing anything else) and restart the app.</p>
+  {% endif %}
+  {% if !test_steps.is_empty() || test_error.is_some() %}
+  <div class="alert {% if test_error.is_some() %}alert-error{% else %}alert-ok{% endif %}" role="status">
+    <strong>Test:</strong>
+    <ul>{% for s in test_steps %}<li>{{ s }}</li>{% endfor %}{% if let Some(e) = test_error %}<li>{{ e }}</li>{% endif %}</ul>
+    {% if test_error.is_none() %}<p>Everything works. Save to use these settings.</p>{% endif %}
+  </div>
+  {% endif %}
+  <form method="post" action="/admin/storage" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="account_id">Account ID <span class="muted">(32 hex characters; R2, Account details)</span></label>
+    <input id="account_id" name="account_id" value="{{ account_id }}" maxlength="32" autocomplete="off" spellcheck="false">
+    <label for="jurisdiction">Jurisdiction <span class="muted">(only if the bucket was created with one)</span></label>
+    <select id="jurisdiction" name="jurisdiction">
+      <option value=""{% if jurisdiction.is_empty() %} selected{% endif %}>Default</option>
+      <option value="eu"{% if jurisdiction == "eu" %} selected{% endif %}>EU</option>
+      <option value="fedramp"{% if jurisdiction == "fedramp" %} selected{% endif %}>FedRAMP</option>
+    </select>
+    <label for="bucket">Bucket</label>
+    <input id="bucket" name="bucket" value="{{ bucket }}" maxlength="63" autocomplete="off" spellcheck="false">
+    <label for="access_key_id">Access Key ID</label>
+    <input id="access_key_id" name="access_key_id" value="{{ access_key_id }}" maxlength="128" autocomplete="off" spellcheck="false">
+    <label for="secret">Secret Access Key <span class="muted">{% if has_secret %}(stored encrypted; leave blank to keep it){% else %}(stored encrypted, never shown again){% endif %}</span></label>
+    <input id="secret" name="secret" type="password" maxlength="256" autocomplete="new-password">
+    <label for="public_url">Public URL <span class="muted">(the bucket's custom domain, e.g. https://dl.example.com)</span></label>
+    <input id="public_url" name="public_url" value="{{ public_url }}" maxlength="255" placeholder="https://dl.example.com" spellcheck="false">
+    <label class="checkbox"><input type="checkbox" name="sync" value="1"{% if sync %} checked{% endif %}> Upload published files to R2</label>
+    <label class="checkbox"><input type="checkbox" name="serve" value="1"{% if serve %} checked{% endif %}> Serve downloads from R2 <span class="muted">(redirect to copies that are uploaded)</span></label>
+    <p class="actions">
+      <button type="submit" class="btn btn-primary glow">Save</button>
+      <button type="submit" formaction="/admin/storage/test" class="btn">Test (without saving)</button>
+    </p>
+  </form>
+  <p class="muted">The test uploads a small file, downloads it through the public URL and deletes it again.
+    Uploads stream each file from this server's storage and are verified against its SHA-256 by R2.
+    Your server's upload bandwidth limits how fast new releases reach R2; until a file is there,
+    it is served from here.</p>
+</section>
+
+{% if configured || has_secret %}
+<section class="card">
+  <h2>Stop using R2</h2>
+  <p>Serves every download from this server again and forgets the R2 settings and secret. Objects already in the
+    bucket are <strong>not</strong> deleted (they stay public on your custom domain): delete them, or the bucket, in the
+    Cloudflare dashboard. To only stop serving from R2, untick "Serve downloads from R2" instead.</p>
+  <form method="post" action="/admin/storage/remove" class="form danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="checkbox"><input type="checkbox" name="confirm" value="yes" required> Yes, stop using R2</label>
+    <button type="submit" class="btn btn-danger">Stop using R2</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

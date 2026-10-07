@@ -1,5 +1,7 @@
-//! Checksum files in GNU coreutils format (`<hex>  <filename>\n`), generated
-//! on the fly from the database so `sha256sum -c SHA256SUMS` works.
+//! Checksum files in GNU coreutils format (`<hex>  <path>\n`), generated on
+//! the fly from the database. Entries are the files' paths in the release
+//! tree (e.g. `sources/a.tar.gz`), so `sha256sum -c SHA256SUMS` works from
+//! the root of a downloaded release.
 
 use crate::db::models::{FileRow, status};
 
@@ -53,12 +55,16 @@ pub fn sums_line(hash: &str, filename: &str) -> String {
     format!("{hash}  {}\n", safe_sums_name(filename))
 }
 
-/// A SUMS file for the ready files that have a digest for `algo`.
+/// A SUMS file for the ready files that have a digest for `algo`, sorted by
+/// path.
 pub fn build_sums<'a>(files: impl IntoIterator<Item = &'a FileRow>, algo: Algo) -> String {
-    files
+    let mut rows: Vec<&FileRow> = files
         .into_iter()
         .filter(|f| f.status == status::READY)
-        .filter_map(|f| algo.hash_of(f).map(|h| sums_line(h, &f.filename)))
+        .collect();
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    rows.into_iter()
+        .filter_map(|f| algo.hash_of(f).map(|h| sums_line(h, &f.path)))
         .collect()
 }
 
@@ -94,7 +100,8 @@ mod tests {
         FileRow {
             id: 1,
             release_id: 1,
-            filename: name.into(),
+            filename: name.rsplit('/').next().unwrap().into(),
+            path: name.into(),
             size_bytes: 1,
             sha256: "a".repeat(64),
             sha512: sha512.map(str::to_string),
@@ -158,6 +165,7 @@ mod tests {
         let files = [
             file("ready.iso", "ready", Some(&"b".repeat(128))),
             file("old.iso", "ready", None),
+            file("sources/a.tar.gz", "ready", None),
             file("importing.iso", "importing", Some("c")),
             file("hashing.iso", "hashing", Some("c")),
             file("failed.iso", "failed", Some("c")),
@@ -165,7 +173,11 @@ mod tests {
         let s256 = build_sums(&files, Algo::Sha256);
         assert_eq!(
             s256,
-            format!("{a}  ready.iso\n{a}  old.iso\n", a = "a".repeat(64))
+            format!(
+                "{a}  old.iso\n{a}  ready.iso\n{a}  sources/a.tar.gz\n",
+                a = "a".repeat(64)
+            ),
+            "sorted by path, folders kept"
         );
         let s512 = build_sums(&files, Algo::Sha512);
         assert_eq!(s512, format!("{}  ready.iso\n", "b".repeat(128)));
