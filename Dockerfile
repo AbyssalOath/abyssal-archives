@@ -4,7 +4,7 @@
 # next to each digest is informational.
 
 # ---- build ------------------------------------------------------------------
-FROM rust:1-trixie@sha256:6ff07edce8775d0f64be7aba9197229407301bddf2054d62c27b541a6238a181 AS builder
+FROM rust:1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
 WORKDIR /build
 
 # Build dependencies first (cached until Cargo.toml/Cargo.lock change).
